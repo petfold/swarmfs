@@ -165,6 +165,15 @@ class SwarmFileSystem(AsyncFileSystem):
             _validate_ref(ref)
         return self._resolve_head(ref), sub.strip("/")
 
+    async def _resolve_path(self, path: str) -> tuple[str, str]:
+        """Async seam over _split_ref — bzzf:// overrides this with a feed
+        lookup, which needs I/O."""
+        return self._split_ref(path)
+
+    def _subpath_of(self, path: str) -> str:
+        """The within-manifest part of a stripped path (syntactic only)."""
+        return path.partition("/")[2].strip("/")
+
     def _origin_of(self, ref: str) -> str:
         return self._origin.get(ref, ref)
 
@@ -213,6 +222,20 @@ class SwarmFileSystem(AsyncFileSystem):
         self._staged_rm.get(okey, set()).discard(sub)
         self.invalidate_cache()
 
+    async def _stage_path(self, path: str, sw: StagedWrite, commit: bool) -> None:
+        """Resolve, stage, optionally commit — used by SwarmFile writes,
+        where resolution must happen lazily (feeds resolve asynchronously)."""
+        ref, sub = await self._resolve_path(path)
+        if not sub:
+            raise IsADirectoryError(path)
+        self._stage_write(ref, sub, sw)
+        if commit:
+            await self._commit_root(ref)
+
+    async def _unstage_path(self, path: str) -> None:
+        ref, sub = await self._resolve_path(path)
+        self._unstage(ref, sub)
+
     def discard_staged(self) -> None:
         """Drop everything staged and uncommitted, on every lineage."""
         for writes in self._staged.values():
@@ -250,8 +273,13 @@ class SwarmFileSystem(AsyncFileSystem):
                 self._root_map[head] = res.new_root
                 self._origin[res.new_root] = okey
             self.commit_log.append(res)
+            await self._after_commit(okey, res)
         self.invalidate_cache()
         return res.new_root
+
+    async def _after_commit(self, okey: str, result: CommitResult) -> None:
+        """Hook run (under the commit lock) after each successful commit —
+        bzzf:// publishes the feed update here."""
 
     async def _commit_all(self) -> dict[str, str | None]:
         results = {}
@@ -267,7 +295,7 @@ class SwarmFileSystem(AsyncFileSystem):
 
     async def _info(self, path, **kwargs):
         path = self._strip_protocol(path)
-        ref, sub = self._split_ref(path)
+        ref, sub = await self._resolve_path(path)
         staged, removed = self._overlay(ref)
         if not sub:
             if not self._is_pseudo(ref):
@@ -331,7 +359,7 @@ class SwarmFileSystem(AsyncFileSystem):
     async def _ls(self, path, detail=True, **kwargs):
         path = self._strip_protocol(path)
         if path not in self.dircache:
-            ref, sub = self._split_ref(path)
+            ref, sub = await self._resolve_path(path)
             staged, removed = self._overlay(ref)
             by_name: dict[str, dict] = {}
             is_dir = self._is_pseudo(ref)  # pseudo roots are directories-in-progress
@@ -405,7 +433,7 @@ class SwarmFileSystem(AsyncFileSystem):
 
     async def _find(self, path, maxdepth=None, withdirs=False, detail=False, **kwargs):
         path = self._strip_protocol(path)
-        ref, sub = self._split_ref(path)
+        ref, sub = await self._resolve_path(path)
         staged, removed = self._overlay(ref)
 
         def depth_ok(rel: str) -> bool:
@@ -478,7 +506,7 @@ class SwarmFileSystem(AsyncFileSystem):
 
     async def _cat_file(self, path, start=None, end=None, **kwargs):
         path = self._strip_protocol(path)
-        ref, sub = self._split_ref(path)
+        ref, sub = await self._resolve_path(path)
         staged, removed = self._overlay(ref)
         if sub in staged:
             data = staged[sub].payload()
@@ -517,7 +545,7 @@ class SwarmFileSystem(AsyncFileSystem):
 
     async def _pipe_file(self, path, value, content_type=None, metadata=None, **kwargs):
         path = self._strip_protocol(path)
-        ref, sub = self._split_ref(path)
+        ref, sub = await self._resolve_path(path)
         if not sub:
             raise IsADirectoryError("cannot write the manifest root; give a file path")
         data = bytes(value)
@@ -532,7 +560,7 @@ class SwarmFileSystem(AsyncFileSystem):
         if os.path.isdir(lpath):
             return
         path = self._strip_protocol(rpath)
-        ref, sub = self._split_ref(path)
+        ref, sub = await self._resolve_path(path)
         if not sub:
             raise IsADirectoryError("cannot write the manifest root; give a file path")
         spool = StagedWrite.spooled()
@@ -547,7 +575,7 @@ class SwarmFileSystem(AsyncFileSystem):
 
     async def _rm_file(self, path, **kwargs):
         path = self._strip_protocol(path)
-        ref, sub = self._split_ref(path)
+        ref, sub = await self._resolve_path(path)
         if not sub:
             raise IsADirectoryError("cannot remove the manifest root")
         staged, removed = self._overlay(ref)
@@ -637,9 +665,8 @@ class SwarmFile(AbstractBufferedFile):
                     f"{fs.api_url} answered neither HEAD /bytes nor GET /chunks"
                 )
         else:
-            stripped = fs._strip_protocol(path)
-            self._ref, self._sub = fs._split_ref(stripped)
-            if not self._sub:
+            self._stripped = fs._strip_protocol(path)
+            if not fs._subpath_of(self._stripped):
                 raise IsADirectoryError(path)
             self._spool = None
 
@@ -658,15 +685,21 @@ class SwarmFile(AbstractBufferedFile):
             sw = StagedWrite(
                 data=self._spool,
                 size=self._spool.tell(),
-                metadata=self.fs._guess_metadata(self._sub, self._content_type, self._metadata),
+                metadata=self.fs._guess_metadata(
+                    self.fs._subpath_of(self._stripped), self._content_type, self._metadata
+                ),
             )
-            self.fs._stage_write(self._ref, self._sub, sw)
-            if self.autocommit and not self.fs._intrans:
-                sync(self.fs.loop, self.fs._commit_root, self._ref)
+            sync(
+                self.fs.loop,
+                self.fs._stage_path,
+                self._stripped,
+                sw,
+                self.autocommit and not self.fs._intrans,
+            )
         return True
 
     def commit(self):
         pass  # the lineage-wide commit happens in SwarmTransaction.complete
 
     def discard(self):
-        self.fs._unstage(self._ref, self._sub)
+        sync(self.fs.loop, self.fs._unstage_path, self._stripped)

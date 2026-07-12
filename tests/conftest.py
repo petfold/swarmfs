@@ -101,6 +101,56 @@ class FakeClient:
         for i in range(0, len(data), chunk_size):
             yield data[i : i + chunk_size]
 
+    async def feed_head(self, owner: str, topic: str) -> tuple[str, str] | None:
+        """Emulate Bee's sequence lookup: scan indexes from 0 until a gap."""
+        from swarmfs.feeds import feed_identifier, soc_address
+
+        ob, tb = bytes.fromhex(owner), bytes.fromhex(topic)
+        index = None
+        i = 0
+        while soc_address(feed_identifier(tb, i), ob) in self.store:
+            index = i
+            i += 1
+        if index is None:
+            return None
+        return index.to_bytes(8, "big").hex(), (index + 1).to_bytes(8, "big").hex()
+
+    async def chunk_get(self, ref: str) -> bytes:
+        data = self.store.get(bytes.fromhex(ref))
+        if data is None:
+            raise FileNotFoundError(ref)
+        return data
+
+    async def soc_post(
+        self, owner: str, identifier: str, signature: str, data: bytes, stamp: str
+    ) -> str:
+        """Store a single-owner chunk, verifying the signature the way Bee
+        does: recover the signer from the personal-sign digest over
+        keccak256(identifier + wrapped chunk address)."""
+        from eth_keys import keys
+
+        from swarmfs.bmt import chunk_address, keccak256
+        from swarmfs.feeds import soc_address
+
+        ob = bytes.fromhex(owner)
+        ib = bytes.fromhex(identifier)
+        sig = bytes.fromhex(signature)
+        digest = keccak256(ib + chunk_address(data))
+        prefixed = keccak256(b"\x19Ethereum Signed Message:\n32" + digest)
+        recovered = keys.Signature(
+            vrs=(
+                sig[64] - 27,
+                int.from_bytes(sig[:32], "big"),
+                int.from_bytes(sig[32:64], "big"),
+            )
+        ).recover_public_key_from_msg_hash(prefixed)
+        assert recovered.to_canonical_address() == ob, "SOC signature does not match owner"
+
+        addr = soc_address(ib, ob)
+        self.store[addr] = ib + sig + data  # SOC chunk data layout
+        self.uploads.append((stamp, len(data)))
+        return addr.hex()
+
     async def bytes_post(self, data, stamp: str, tag=None, pin=False) -> str:
         if not isinstance(data, bytes):
             data.seek(0)

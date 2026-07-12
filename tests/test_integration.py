@@ -159,6 +159,42 @@ def test_zarr_xarray_roundtrip_live():
     xr.testing.assert_identical(out, ds)
 
 
+@pytest.mark.skipif(not STAMP, reason="writes need SWARMFS_TEST_STAMP")
+def test_bzzf_two_mounts_live():
+    """v2 exit criterion on a real node: two mounts of the same bzzf:// feed
+    see each other's committed changes."""
+    pytest.importorskip("eth_keys")
+    import secrets
+
+    from swarmfs import SwarmFeedFileSystem
+    from swarmfs.feeds import FeedSigner
+
+    key = secrets.token_hex(32)  # fresh feed per run
+    owner = FeedSigner(key).owner_hex
+    url = f"bzzf://{owner}/swarmfs-integration/state.txt"
+
+    a = SwarmFeedFileSystem(
+        api_url=BEE, stamp=STAMP, signer=key, feed_ttl=0, skip_instance_cache=True
+    )
+    a.pipe_file(url, b"written by mount A")
+
+    # a keyless reader resolves the feed
+    reader = SwarmFeedFileSystem(api_url=BEE, skip_instance_cache=True)
+    assert reader.cat_file(url) == b"written by mount A"
+
+    # a second writer updates; the first mount sees it (last-write-wins)
+    c = SwarmFeedFileSystem(
+        api_url=BEE, stamp=STAMP, signer=key, feed_ttl=0, skip_instance_cache=True
+    )
+    c.pipe_file(url, b"updated by mount C")
+    c.pipe_file(f"bzzf://{owner}/swarmfs-integration/extra.txt", b"more")
+    assert a.cat_file(url) == b"updated by mount C"
+    assert sorted(a.ls(f"bzzf://{owner}/swarmfs-integration", detail=False)) == [
+        f"{owner}/swarmfs-integration/extra.txt",
+        f"{owner}/swarmfs-integration/state.txt",
+    ]
+
+
 @pytest.mark.skipif(not STAMP, reason="upload fixture needs SWARMFS_TEST_STAMP")
 def test_dask_partitioned_parquet_live(fs):
     """The v0 exit criterion against a *real* node: upload a partitioned

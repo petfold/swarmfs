@@ -49,6 +49,7 @@ class CommitResult:
     new_root: str
     written: dict[str, str] = field(default_factory=dict)  # path -> data reference
     removed: list[str] = field(default_factory=list)
+    batch: str = ""  # the postage batch the commit used
 
 
 class CommitEngine:
@@ -111,7 +112,11 @@ class CommitEngine:
         for sw in writes.values():
             sw.close()
         return CommitResult(
-            old_root=root, new_root=new_root.hex(), written=uploaded, removed=removes
+            old_root=root,
+            new_root=new_root.hex(),
+            written=uploaded,
+            removed=removes,
+            batch=batch,
         )
 
 

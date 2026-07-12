@@ -80,14 +80,23 @@ immutable — fine at this depth).
 
 Goal: a stable, writable mount where the URL doesn't change as contents change.
 
-- [ ] Feed read: resolve `bzzf://<owner-or-ens>/<topic>/path` → latest root via feed lookup.
-      ENS resolution for owner where applicable.
-- [ ] Feed write: after a commit, update the feed to the new root (needs signer config in
-      `storage_options`).
-- [ ] TTL/caching of feed resolution per filesystem instance.
-- [ ] Concurrency note: feeds are last-write-wins; document it, don't pretend otherwise.
+- [x] Feed read: resolve `bzzf://<owner>/<topic>/path` → latest root via feed lookup
+      (server-side sequence lookup + client-side SOC parse; all three payload formats).
+      ENS resolution for owner still deferred (needs a resolver-enabled node).
+- [x] Feed write: after a commit, update the feed to the new root — client-side signed
+      SOC (`signer` in `storage_options`, `feeds` extra). Includes `swarmfs/bmt.py`
+      (BMT chunk addressing, validated against real captured references) — also the
+      primitive for the future chunk-verification mode.
+- [x] TTL/caching of feed resolution per filesystem instance (`feed_ttl`, default 15 s;
+      own commits refresh immediately, external updates adopted).
+- [x] Concurrency note: feeds are last-write-wins; documented in `CLAUDE.md` and the
+      module docstring, not pretended otherwise.
 
-Exit criterion: two processes mounting the same `bzzf://` see each other's committed changes.
+Exit criterion: two processes mounting the same `bzzf://` see each other's committed
+changes. **MET offline** (`test_feedfs.py::test_update_cycle_two_writers`, with real
+signature verification in the fake node); the live-node variant
+(`test_bzzf_two_mounts_live`) is written and gated — the local node was down when v2
+landed, run it when the node is back.
 
 ## Later / opportunistic
 

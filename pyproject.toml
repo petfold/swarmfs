@@ -27,6 +27,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+feeds = [
+    "eth-keys>=0.4",
+    "eth-hash[pycryptodome]>=0.5",
+]
 test = [
     "pytest>=7",
     "pandas",
@@ -34,10 +38,12 @@ test = [
     "dask[dataframe]",
     "zarr>=3",
     "xarray",
+    "swarmfs[feeds]",
 ]
 
 [project.entry-points."fsspec.specs"]
 bzz = "swarmfs:SwarmFileSystem"
+bzzf = "swarmfs:SwarmFeedFileSystem"
 
 [project.urls]
 Homepage = "https://github.com/solarpunk/swarmfs"

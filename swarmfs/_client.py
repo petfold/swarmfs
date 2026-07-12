@@ -193,6 +193,51 @@ class SwarmClient:
             await self._raise_for_status(resp, url)
             return await resp.json()
 
+    # ------------------------------------------------------------ feeds/SOC
+
+    async def feed_head(self, owner: str, topic: str) -> tuple[str, str] | None:
+        """Current (index, next index) of a sequence feed, as hex strings from
+        the Swarm-Feed-Index headers; None if the feed has no updates yet.
+
+        Sends Swarm-Only-Root-Chunk so Bee doesn't stream the resolved
+        content — only the headers matter here.
+        """
+        url = f"{self.api_url}/feeds/{owner}/{topic}?type=sequence"
+        session = await self._get_session()
+        async with session.get(url, headers={"Swarm-Only-Root-Chunk": "true"}) as resp:
+            if resp.status == 404:
+                return None
+            await self._raise_for_status(resp, url)
+            index = resp.headers.get("Swarm-Feed-Index")
+            next_index = resp.headers.get("Swarm-Feed-Index-Next", "")
+            if not index:
+                return None
+            return index, next_index
+
+    async def chunk_get(self, ref: str) -> bytes:
+        """GET /chunks/{ref} — one raw chunk (span+payload; SOCs include
+        identifier and signature)."""
+        url = f"{self.api_url}/chunks/{ref}"
+        session = await self._get_session()
+        async with session.get(url) as resp:
+            await self._raise_for_status(resp, url)
+            return await resp.read()
+
+    async def soc_post(
+        self, owner: str, identifier: str, signature: str, data: bytes, stamp: str
+    ) -> str:
+        """POST /soc/{owner}/{identifier}?sig=… — upload a single-owner chunk
+        (the node verifies the signature). Body is the wrapped chunk data."""
+        url = f"{self.api_url}/soc/{owner}/{identifier}?sig={signature}"
+        headers = {
+            "swarm-postage-batch-id": stamp,
+            "content-type": "application/octet-stream",
+        }
+        session = await self._get_session()
+        async with session.post(url, data=data, headers=headers) as resp:
+            await self._raise_for_status(resp, url)
+            return (await resp.json())["reference"]
+
     async def health(self) -> dict:
         url = f"{self.api_url}/health"
         session = await self._get_session()

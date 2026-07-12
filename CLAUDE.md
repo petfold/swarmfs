@@ -107,6 +107,32 @@ generates the sync interface automatically. Range requests: Bee supports HTTP Ra
 downloads — implement `_fetch_range` so fsspec block caching / readahead work, which is what
 makes Parquet predicate pushdown and zarr chunk reads viable.
 
+## v2 feed semantics (decided, implemented)
+
+- **Path model**: `bzzf://<owner>/<topic>/path` — owner is a 40-hex ethereum address
+  (0x-prefix tolerated), topic is a human string (keccak256'd, bee-js
+  `Topic.fromString` convention) or a raw 64-hex topic. ENS owners deferred.
+- **Read** needs no keys: Bee's server-side sequence lookup (`GET /feeds`, headers only
+  via `Swarm-Only-Root-Chunk`) finds the current index; we fetch the SOC chunk at that
+  index ourselves and parse the payload — handling bee-js's `timestamp‖ref` format, a
+  bare ref, and the wrapped-root-chunk format (via our BMT hasher).
+- **Write** reuses the v1 commit machinery unchanged — a feed is just another lineage
+  whose head advances — plus an `_after_commit` hook that publishes a client-side-signed
+  SOC feed update (bee-js `timestamp‖ref` format, same postage batch as the commit).
+  Requires `signer=<private key hex>` in storage_options and the optional `feeds` extra
+  (`eth-keys` + `eth-hash[pycryptodome]`; core deps stay lean). Missing/mismatched
+  signers fail at *staging* time, before anything uploads.
+- **`swarmfs/bmt.py`**: BMT chunk addressing in pure Python — required for SOC signing
+  (the signature covers the wrapped chunk's address), validated against the real
+  references in the captured manifest fixture, and the primitive for the future opt-in
+  chunk-verification mode.
+- **Freshness/concurrency**: feed resolution is TTL-cached per instance (`feed_ttl`,
+  default 15 s); own commits refresh it immediately; other writers' updates are adopted
+  when seen (roots this instance committed are never rolled back by a stale lookup).
+  Feeds are last-write-wins — documented, not papered over.
+- **Listings stay in feed coordinates** (`<owner>/<topic>/…`), preserving the stable-URL
+  illusion instead of leaking resolved root hashes.
+
 ## Prior art: ipfsspec (study, don't copy wholesale)
 
 `ipfsspec` (IPFS backend in the official fsspec org) is the closest existing analog and

@@ -7,9 +7,25 @@ HTTP API. Installing it makes Swarm a first-class storage backend for the
 Python data ecosystem — pandas, dask, zarr, xarray, pyarrow, DuckDB — via
 URLs like `bzz://<reference>/path/to/file.parquet`.
 
-**Status: v0 — read-only `bzz://`.** Writes (postage stamps, transactional
-commits) and mutable feed-backed `bzzf://` are on the
-[roadmap](roadmap.md).
+**Status: v2.** Read-only `bzz://` access, transactional copy-on-write
+writes (postage stamps, every commit a snapshot), and mutable feed-backed
+`bzzf://` mounts. See the [roadmap](roadmap.md).
+
+```python
+import fsspec
+
+# immutable, content-addressed: every commit yields a new root reference
+fs = fsspec.filesystem("bzz", stamp="auto")
+with fs.transaction:
+    fs.pipe_file("bzz://new/dataset/a.parquet", data_a)
+    fs.pipe_file("bzz://new/dataset/b.parquet", data_b)
+root = fs.latest("new")          # share this reference; it never changes
+
+# mutable, feed-backed: a stable URL whose contents you can update
+ffs = fsspec.filesystem("bzzf", stamp="auto", signer="<private key hex>")
+ffs.pipe_file(f"bzzf://{owner}/my-app/config.json", b'{"v": 2}')
+# readers need no keys — and the URL never changes
+```
 
 ## Usage
 
