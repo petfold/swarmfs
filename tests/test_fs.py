@@ -72,6 +72,21 @@ def test_info(fs):
         fs.info(f"bzz://{root}/missing.txt")
 
 
+def test_modified_is_constant_but_checks_existence(fs):
+    """bzz:// content is immutable at a fixed reference, so modified() has no
+    real timestamp to report — but consumers that require one (e.g. DuckDB's
+    fsspec bridge) shouldn't get NotImplementedError, and a missing path
+    should still raise like info() does."""
+    fs, root = fs
+    import datetime
+
+    ts = fs.modified(f"bzz://{root}/index.html")
+    assert ts == datetime.datetime.fromtimestamp(0, tz=datetime.timezone.utc)
+    assert fs.modified(f"bzz://{root}/index.html") == ts  # stable across calls
+    with pytest.raises(FileNotFoundError):
+        fs.modified(f"bzz://{root}/missing.txt")
+
+
 def test_predicates(fs):
     fs, root = fs
     assert fs.isfile(f"bzz://{root}/index.html")

@@ -11,6 +11,11 @@ URLs like `bzz://<reference>/path/to/file.parquet`.
 writes (postage stamps, every commit a snapshot), and mutable feed-backed
 `bzzf://` mounts. See the [roadmap](roadmap.md).
 
+New to swarmfs? This README is a quick reference — the
+**[User Guide](USER_GUIDE.md)** walks through a worked example for every
+library above (pandas, all three Dask collection types, Zarr, xarray,
+PyArrow, DuckDB) and explains the content-addressing model in plain terms.
+
 ## Upload and download a file
 
 You need a running [Bee light node](https://docs.ethswarm.org/docs/bee/installation/getting-started/)

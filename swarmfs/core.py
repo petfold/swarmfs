@@ -18,6 +18,7 @@ through the original URL keep seeing the latest committed state
 from __future__ import annotations
 
 import asyncio
+import datetime
 import mimetypes
 import os
 import posixpath
@@ -278,6 +279,19 @@ class SwarmFileSystem(AsyncFileSystem):
             await self._setup()
             self._backend = await detect_listing_backend(self._reader)
         return self._backend
+
+    def modified(self, path):
+        """A fixed timestamp, for consumers (e.g. DuckDB's fsspec bridge)
+        that require ``modified()`` not to raise.
+
+        ``bzz://`` content is content-addressed and immutable at a fixed
+        reference, so there is no real last-modified time to report; this
+        checks the path exists (like ``info``) and returns the epoch.
+        ``bzzf://`` mounts inherit this — it does not reflect a feed's most
+        recent update.
+        """
+        self.info(path)
+        return datetime.datetime.fromtimestamp(0, tz=datetime.timezone.utc)
 
     def invalidate_cache(self, path=None):
         if path is None:

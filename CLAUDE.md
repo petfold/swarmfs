@@ -146,6 +146,21 @@ chunk. This is the single biggest piece of real engineering in the project.
   402. 404 stays builtin `FileNotFoundError` (fsspec semantics depend on it).
   `StampError` now lives in exceptions.py, re-exported from `swarmfs.stamps`.
 
+## `modified()` (decided, implemented)
+
+`AbstractFileSystem.modified()` raises `NotImplementedError` by default;
+DuckDB's fsspec bridge calls it unconditionally, so `read_parquet` over a
+registered swarmfs filesystem failed outright until this was overridden.
+`SwarmFileSystem.modified(path)` checks the path exists (like `info`) and
+returns a fixed constant (the epoch) — the honest answer, since `bzz://`
+content is content-addressed and immutable at a fixed reference: there is no
+real last-modified time to report, and a constant can never spuriously
+invalidate a downstream cache. `bzzf://` mounts inherit this unchanged; it
+does **not** reflect a feed's most recent update (the SOC payload's
+timestamp is parsed in `feeds.py` but currently discarded) — a real
+per-feed `modified()` is a reasonable future addition but wasn't in scope
+for this fix.
+
 ## Base class and async
 
 Subclass `fsspec.asyn.AsyncFileSystem` (the s3fs/gcsfs pattern) over `aiohttp`. fsspec
