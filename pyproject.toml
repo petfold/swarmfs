@@ -32,6 +32,8 @@ test = [
     "pandas",
     "pyarrow",
     "dask[dataframe]",
+    "zarr>=3",
+    "xarray",
 ]
 
 [project.entry-points."fsspec.specs"]

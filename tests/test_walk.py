@@ -134,7 +134,7 @@ def test_random_tree_roundtrip():
             for p in sorted(paths):
                 entry = hashlib.sha256(p.encode()).digest()
                 expected[p] = entry
-                add(root, p.encode(), entry)
+                await add(root, p.encode(), entry)
             root_ref = await save(root, saver)
             ns = make_store(store)
             return {

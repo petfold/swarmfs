@@ -44,22 +44,37 @@ reads it back through dask+swarmfs.
 
 Goal: write a collection, get a new root reference back, read it.
 
-- [ ] Mantaray **build + patch**: construct a trie from entries; patch an existing trie so a
-      single-file change re-uploads only the affected path.
-- [ ] `StampManager`: list batches (`/stamps`), select/validate, check usability + TTL,
-      fail early with actionable errors. `stamp="auto"` and explicit batch-id modes.
-- [ ] `CommitEngine`: stage writes (memory + local spool), parallel chunk upload with tags
-      (`/tags`) for progress, build/patch manifest, return new root. Before designing it,
-      review `ipfspy` (Algovera) — rough, but has a local-node write path worth studying.
+- [x] Mantaray **build + patch**: construct a trie from entries; patch an existing trie so a
+      single-file change re-uploads only the affected path. (One canonical async
+      add/remove in `mantaray/build.py`, load-on-demand + copy-on-write; patch tests run
+      against the captured real-Bee manifest and assert ≤5 node re-uploads out of 16.)
+- [x] `StampManager`: list batches (`/stamps`), select/validate, check usability + TTL +
+      fullness, fail early with actionable errors. `stamp="auto"` and explicit batch-id
+      modes. (Fail-early proved its worth immediately: caught a 100%-utilized batch
+      before any byte was uploaded, in the first live run.)
+- [x] `CommitEngine`: stage writes (memory + local spool), parallel `/bytes` uploads,
+      build/patch manifest, return new root. (Reviewed `ipfspy` first: it proxies IPFS's
+      server-side MFS per-op — no staging, no atomicity — confirming our client-side
+      staged-commit contrast.) Tags/progress reporting not wired yet — later.
 - [ ] Opt-in client-side chunk verification (BMT hash of fetched data vs. its reference)
       for the gateway read path — mitigation for the discouraged-but-supported gateway
       mode, not on by default for local nodes. May pull forward into v0 if gateway opt-in
       lands there.
-- [ ] Wire fsspec `transaction` → deferred commit. `_pipe_file`, `_put_file`, `_rm`, `_mkdir`
-      semantics defined for copy-on-write.
-- [ ] `get_mapper` write path → **zarr write demo** (flagship). Round-trip a zarr array.
+- [x] Wire fsspec `transaction` → deferred commit (one commit per manifest lineage;
+      rollback discards without uploading). `_pipe_file`, `_put_file`, `_rm`, `_mkdir`,
+      `open("wb")`, `_cp_file` defined for copy-on-write. Root lineage model: `bzz://new/…`
+      pseudo-refs, per-instance old→new root map (read-your-writes), `fs.latest()` +
+      `fs.commit_log`. See "v1 write semantics" in `CLAUDE.md`.
+- [x] `get_mapper` write path → **zarr write demo** (flagship): zarr 3's `FsspecStore`
+      drives the async interface directly; round-trips offline.
 
-Exit criterion: create a zarr store on Swarm, read it back with xarray.
+Exit criterion: create a zarr store on Swarm, read it back with xarray. **MET** — offline
+(`tests/test_zarr.py::test_xarray_dataset_roundtrip`) *and* against a real Bee 2.8.1 node
+(`test_zarr_xarray_roundtrip_live`), plus a live transactional write/rm/snapshot round
+trip. Notes from the live run: the old postage batch filled up and the fail-early
+`StampManager` caught it before any upload; bought `swarmfs-tests` (depth-18; NB Bee's
+`POST /stamps` takes `Immutable` as a *header*, not a query param, so it came out
+immutable — fine at this depth).
 
 ## v2 — `bzzf://` feed-mounted mutability
 

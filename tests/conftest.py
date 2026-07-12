@@ -51,21 +51,33 @@ def build_manifest(
     async def build() -> bytes:
         root = Node()
         for path, content in files.items():
-            add(root, path.encode(), put(content), (metadata or {}).get(path))
+            await add(root, path.encode(), put(content), (metadata or {}).get(path))
         if root_metadata:
             # bee stores manifest-level metadata (index document etc.) at "/"
-            add(root, b"/", b"", root_metadata)
+            await add(root, b"/", b"", root_metadata)
         return await save(root, saver)
 
     return asyncio.run(build()).hex(), store
 
 
+GOOD_STAMP = {
+    "batchID": "ab" * 32,
+    "usable": True,
+    "batchTTL": 86400,
+    "utilizationRatio": 0.25,
+    "label": "test-stamp",
+    "immutableFlag": True,
+}
+
+
 class FakeClient:
     """Duck-typed SwarmClient over the in-memory store."""
 
-    def __init__(self, store: dict[bytes, bytes]):
+    def __init__(self, store: dict[bytes, bytes], stamps: list[dict] | None = None):
         self.store = store
         self.api_url = "fake://"
+        self.stamps = [GOOD_STAMP] if stamps is None else stamps
+        self.uploads: list[tuple[str, int]] = []  # (stamp, nbytes) per POST /bytes
 
     async def bytes_get(self, ref: str, start=None, end=None) -> bytes:
         data = self.store.get(bytes.fromhex(ref))
@@ -88,6 +100,24 @@ class FakeClient:
         data = await self.bytes_get(ref)
         for i in range(0, len(data), chunk_size):
             yield data[i : i + chunk_size]
+
+    async def bytes_post(self, data, stamp: str, tag=None, pin=False) -> str:
+        if not isinstance(data, bytes):
+            data.seek(0)
+            data = data.read()
+        ref = hashlib.sha256(data).digest()
+        self.store[ref] = data
+        self.uploads.append((stamp, len(data)))
+        return ref.hex()
+
+    async def stamps_list(self) -> list[dict]:
+        return self.stamps
+
+    async def tag_create(self) -> int:
+        return 1
+
+    async def tag_get(self, uid: int) -> dict:
+        return {"uid": uid}
 
     async def close(self) -> None:
         pass

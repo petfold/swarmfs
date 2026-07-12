@@ -137,16 +137,6 @@ def test_du(fs):
     )
 
 
-def test_writes_rejected(fs):
-    fs, root = fs
-    with pytest.raises(NotImplementedError, match="read-only"):
-        fs.pipe_file(f"bzz://{root}/new.txt", b"data")
-    with pytest.raises(NotImplementedError, match="read-only"):
-        fs.open(f"bzz://{root}/new.txt", "wb")
-    with pytest.raises(NotImplementedError, match="read-only"):
-        fs.rm(f"bzz://{root}/index.html")
-
-
 def test_get_file_download(fs, tmp_path):
     fs, root = fs
     local = tmp_path / "logo.png"

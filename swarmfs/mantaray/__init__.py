@@ -4,7 +4,7 @@ Independently useful — candidate for extraction as a standalone
 ``mantaray-py`` package once the API settles.
 """
 
-from .build import add, save
+from .build import add, remove, save
 from .node import (
     NT_EDGE,
     NT_VALUE,
@@ -29,6 +29,7 @@ __all__ = [
     "marshal",
     "unmarshal",
     "add",
+    "remove",
     "save",
     "FileEntry",
     "Location",

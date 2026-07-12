@@ -72,6 +72,34 @@ chunk. This is the single biggest piece of real engineering in the project.
    parallel chunk uploads with tags for progress, building/patching the manifest, the
    feed-update step for `bzzf://`.
 
+## v1 write semantics (decided, implemented)
+
+- **Copy-on-write staged commits.** Writes stage on the filesystem instance; a commit
+  validates the stamp first (fail early, never a mid-write 402), uploads data blobs in
+  parallel, patches the Mantaray trie client-side (O(path depth) node re-uploads — proven
+  against the real-Bee fixture), and yields a new root. Old roots are untouched: every
+  commit is a snapshot.
+- **Autocommit vs. transaction.** Outside a transaction every write op commits
+  immediately. Inside ``with fs.transaction:`` everything is one commit per manifest
+  lineage; rollback on exception discards staging having uploaded nothing.
+- **Where does the new root go?** (old open decision — resolved: neither loudly nor
+  quietly, but *queryably*.) The instance keeps an old→new root map: reads through the
+  original URL see the latest committed state (read-your-writes), `fs.latest(ref)`
+  returns the current head, `fs.commit_log` the history. Fresh manifests start at the
+  pseudo-reference `bzz://new/...` (or `new-<suffix>` for several in one instance).
+- **Lineage discipline.** Staging is keyed by each lineage's *origin* root and commits
+  are serialized per instance, so concurrent writers (zarr writes chunks concurrently)
+  extend one lineage instead of forking it. Content-addressing corner: committing
+  identical content yields an identical root — never record an identity mapping
+  (it makes head-resolution loop forever; found via xarray's double group-metadata write).
+- **Metadata on write** (old open decision — resolved): emit bee-style `Content-Type`
+  (guessed from the filename unless given) + `Filename`, matching what bee's own
+  uploader produces (verified against the captured fixture).
+- `mkdir`/`makedirs` are no-ops (directories are implicit in manifests). Write spool:
+  `tempfile.SpooledTemporaryFile`, 16 MiB memory threshold (old open decision — resolved).
+- Removing a directory's last file prunes the empty intermediate nodes (deliberate,
+  small deviation from bee's Remove, which leaves empty nodes behind).
+
 ## Base class and async
 
 Subclass `fsspec.asyn.AsyncFileSystem` (the s3fs/gcsfs pattern) over `aiohttp`. fsspec

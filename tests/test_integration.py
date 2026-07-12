@@ -94,6 +94,71 @@ def test_read_existing_reference(fs, root_ref):
         assert len(data) == info["size"]
 
 
+@pytest.mark.skipif(not STAMP, reason="writes need SWARMFS_TEST_STAMP")
+def test_write_roundtrip_live():
+    """v1 against a real node: fresh manifest, transactional batch, rm, patch."""
+    from swarmfs import SwarmFileSystem
+
+    fs = SwarmFileSystem(api_url=BEE, stamp=STAMP, skip_instance_cache=True)
+
+    # fresh manifest through the pseudo-root
+    fs.pipe_file("bzz://new/hello.txt", b"hello from swarmfs v1\n")
+    root1 = fs.latest("new")
+    assert len(root1) == 64
+    assert fs.cat_file(f"bzz://{root1}/hello.txt") == b"hello from swarmfs v1\n"
+
+    # transactional batch: one commit for three ops
+    ncommits = len(fs.commit_log)
+    with fs.transaction:
+        fs.pipe_file("bzz://new/data/a.bin", bytes(range(256)) * 8)
+        fs.pipe_file("bzz://new/data/b.bin", b"b" * 5000)
+        fs.rm_file("bzz://new/hello.txt")
+    assert len(fs.commit_log) == ncommits + 1
+    root2 = fs.latest("new")
+
+    # a fresh instance (no root map, no staging) sees the committed state
+    fresh = SwarmFileSystem(api_url=BEE, skip_instance_cache=True)
+    assert fresh.find(f"bzz://{root2}") == sorted(
+        [f"{root2}/data/a.bin", f"{root2}/data/b.bin"]
+    )
+    assert fresh.cat_file(f"bzz://{root2}/data/b.bin", start=100, end=105) == b"bbbbb"
+    # the first snapshot is untouched
+    assert fresh.cat_file(f"bzz://{root1}/hello.txt") == b"hello from swarmfs v1\n"
+
+    # metadata written bee-style
+    info = fresh.info(f"bzz://{root2}/data/a.bin")
+    assert info["size"] == 2048
+    assert info["metadata"]["Filename"] == "a.bin"
+
+
+@pytest.mark.skipif(not STAMP, reason="writes need SWARMFS_TEST_STAMP")
+def test_zarr_xarray_roundtrip_live():
+    """v1 exit criterion on a real node: zarr store on Swarm, read via xarray."""
+    np = pytest.importorskip("numpy")
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("zarr")
+    from zarr.storage import FsspecStore
+
+    from swarmfs import SwarmFileSystem
+
+    fs = SwarmFileSystem(
+        api_url=BEE, stamp=STAMP, asynchronous=True, skip_instance_cache=True
+    )
+    ds = xr.Dataset(
+        {"temperature": (("x", "y"), np.random.default_rng(11).normal(15, 3, (8, 12)))},
+        coords={"x": np.arange(8), "y": np.arange(12)},
+    )
+    ds.to_zarr(FsspecStore(fs, path="new/climate"), mode="w", consolidated=False)
+    root = fs.latest("new")
+    assert len(root) == 64
+
+    fs2 = SwarmFileSystem(api_url=BEE, asynchronous=True, skip_instance_cache=True)
+    out = xr.open_zarr(
+        FsspecStore(fs2, read_only=True, path=f"{root}/climate"), consolidated=False
+    ).load()
+    xr.testing.assert_identical(out, ds)
+
+
 @pytest.mark.skipif(not STAMP, reason="upload fixture needs SWARMFS_TEST_STAMP")
 def test_dask_partitioned_parquet_live(fs):
     """The v0 exit criterion against a *real* node: upload a partitioned

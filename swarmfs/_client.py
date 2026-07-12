@@ -146,6 +146,53 @@ class SwarmClient:
             async for chunk in resp.content.iter_chunked(chunk_size):
                 yield chunk
 
+    # ------------------------------------------------------------ write side
+
+    async def bytes_post(
+        self,
+        data: bytes,
+        stamp: str,
+        tag: int | None = None,
+        pin: bool = False,
+    ) -> str:
+        """POST /bytes — upload a blob, returns its reference (hex)."""
+        url = f"{self.api_url}/bytes"
+        headers = {
+            "swarm-postage-batch-id": stamp,
+            "content-type": "application/octet-stream",
+        }
+        if tag is not None:
+            headers["swarm-tag"] = str(tag)
+        if pin:
+            headers["swarm-pin"] = "true"
+        session = await self._get_session()
+        async with session.post(url, data=data, headers=headers) as resp:
+            await self._raise_for_status(resp, url)
+            return (await resp.json())["reference"]
+
+    async def stamps_list(self) -> list[dict]:
+        """GET /stamps — the node's postage batches."""
+        url = f"{self.api_url}/stamps"
+        session = await self._get_session()
+        async with session.get(url) as resp:
+            await self._raise_for_status(resp, url)
+            return (await resp.json()).get("stamps") or []
+
+    async def tag_create(self) -> int:
+        """POST /tags — a tag uid for tracking upload progress."""
+        url = f"{self.api_url}/tags"
+        session = await self._get_session()
+        async with session.post(url, json={}) as resp:
+            await self._raise_for_status(resp, url)
+            return (await resp.json())["uid"]
+
+    async def tag_get(self, uid: int) -> dict:
+        url = f"{self.api_url}/tags/{uid}"
+        session = await self._get_session()
+        async with session.get(url) as resp:
+            await self._raise_for_status(resp, url)
+            return await resp.json()
+
     async def health(self) -> dict:
         url = f"{self.api_url}/health"
         session = await self._get_session()

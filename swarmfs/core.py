@@ -1,37 +1,72 @@
 """SwarmFileSystem: fsspec AsyncFileSystem over the Bee HTTP API.
 
 Paths look like ``bzz://<64-or-128-hex-reference>/<path-inside-manifest>``;
-the reference plays the role of a bucket. v0 is read-only — writes arrive
-with the v1 transactional commit engine.
+the reference plays the role of a bucket. ``bzz://new/...`` (or ``new-<any>``)
+addresses a fresh, not-yet-committed manifest.
+
+Writes are copy-on-write: they are staged on the filesystem instance and
+committed — each commit uploads the changed data, patches the manifest trie
+client-side, and yields a *new* root reference (the old root is untouched;
+every commit is a snapshot). Outside a transaction every write operation
+commits immediately; inside ``with fs.transaction:`` everything is committed
+together on exit. The instance remembers old→new root mappings, so reads
+through the original URL keep seeing the latest committed state
+(read-your-writes); ``fs.latest(ref)`` returns the current head and
+``fs.commit_log`` the full history.
 """
 
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 import os
+import posixpath
+import shutil
 import weakref
 
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.exceptions import FSTimeoutError
 from fsspec.spec import AbstractBufferedFile
+from fsspec.transaction import Transaction
 from fsspec.utils import stringify_path
 
 from ._client import DEFAULT_API_URL, SwarmClient
 from ._listing import ListingBackend, detect_listing_backend
-
-_WRITES_MSG = "swarmfs is read-only for now; writes arrive with the v1 commit engine"
+from .commit import CommitEngine, CommitResult, StagedWrite
+from .stamps import StampManager
 
 
 def _validate_ref(ref: str) -> None:
     if len(ref) not in (64, 128) or any(c not in "0123456789abcdefABCDEF" for c in ref):
         raise ValueError(
             f"invalid swarm reference {ref!r}: expected 64 hex chars "
-            "(or 128 for encrypted references). ENS names are not supported yet."
+            "(or 128 for encrypted references), or 'new' for a fresh manifest. "
+            "ENS names are not supported yet."
         )
 
 
+class SwarmTransaction(Transaction):
+    """Defers all staged writes to a single commit per manifest lineage."""
+
+    def complete(self, commit=True):
+        fs = self.fs
+        while self.files:
+            f = self.files.popleft()
+            if commit:
+                f.commit()
+            else:
+                f.discard()
+        if commit:
+            sync(fs.loop, fs._commit_all)
+        else:
+            fs.discard_staged()
+        fs._intrans = False
+        fs._transaction = None
+        self.fs = None
+
+
 class SwarmFileSystem(AsyncFileSystem):
-    """Read access to Swarm content via a Bee node or public gateway.
+    """Read/write access to Swarm content via a Bee node.
 
     Parameters
     ----------
@@ -46,12 +81,18 @@ class SwarmFileSystem(AsyncFileSystem):
         Total per-request timeout in seconds.
     headers:
         Extra HTTP headers sent with every request.
+    stamp:
+        Postage batch for writes: a batch id (64 hex), or ``"auto"``/None to
+        pick the usable batch with the longest TTL at commit time.
+    pin:
+        Ask the node to pin uploaded content locally.
     client:
         Injection seam for a pre-built ``SwarmClient`` (used by tests).
     """
 
     protocol = "bzz"
     root_marker = ""
+    transaction_type = SwarmTransaction
 
     def __init__(
         self,
@@ -59,6 +100,8 @@ class SwarmFileSystem(AsyncFileSystem):
         block_size: int | None = None,
         timeout: float = 120,
         headers: dict[str, str] | None = None,
+        stamp: str | None = None,
+        pin: bool = False,
         client: SwarmClient | None = None,
         asynchronous: bool = False,
         loop=None,
@@ -68,7 +111,17 @@ class SwarmFileSystem(AsyncFileSystem):
         self.api_url = api_url or os.environ.get("BEE_API_URL", DEFAULT_API_URL)
         self.client = client or SwarmClient(self.api_url, timeout=timeout, headers=headers)
         self.block_size = block_size or 2**20
+        self.stamp = stamp
+        self.pin = pin
         self._backend: ListingBackend | None = None
+        self._engine = CommitEngine(self.client, StampManager(self.client), pin=pin)
+        # staging, keyed by the *origin* root of each manifest lineage
+        self._staged: dict[str, dict[str, StagedWrite]] = {}
+        self._staged_rm: dict[str, set[str]] = {}
+        self._root_map: dict[str, str] = {}  # committed root -> its successor
+        self._origin: dict[str, str] = {}  # any root in a lineage -> origin
+        self._commit_lock = asyncio.Lock()
+        self.commit_log: list[CommitResult] = []
         weakref.finalize(self, self._close_client, self.loop, self.client)
 
     @staticmethod
@@ -78,6 +131,8 @@ class SwarmFileSystem(AsyncFileSystem):
                 sync(loop, client.close, timeout=0.1)
             except (TimeoutError, FSTimeoutError, NotImplementedError, RuntimeError):
                 pass
+
+    # ----------------------------------------------------------- path model
 
     @classmethod
     def _strip_protocol(cls, path) -> str:
@@ -89,10 +144,33 @@ class SwarmFileSystem(AsyncFileSystem):
         return path.strip("/")
 
     @staticmethod
-    def _split_ref(path: str) -> tuple[str, str]:
+    def _is_pseudo(ref: str) -> bool:
+        return ref == "new" or ref.startswith("new-")
+
+    def _resolve_head(self, ref: str) -> str:
+        # a commit of identical content yields an identical root (content
+        # addressing), so guard against identity/cyclic entries
+        while ref in self._root_map and self._root_map[ref] != ref:
+            ref = self._root_map[ref]
+        return ref
+
+    def latest(self, ref: str) -> str:
+        """Follow committed root mappings to the current head of a lineage."""
+        return self._resolve_head(self._strip_protocol(ref).partition("/")[0])
+
+    def _split_ref(self, path: str) -> tuple[str, str]:
+        """Split into (resolved root reference, subpath)."""
         ref, _, sub = path.partition("/")
-        _validate_ref(ref)
-        return ref, sub.strip("/")
+        if not self._is_pseudo(ref):
+            _validate_ref(ref)
+        return self._resolve_head(ref), sub.strip("/")
+
+    def _origin_of(self, ref: str) -> str:
+        return self._origin.get(ref, ref)
+
+    def _overlay(self, ref: str) -> tuple[dict[str, StagedWrite], set[str]]:
+        okey = self._origin_of(ref)
+        return self._staged.get(okey, {}), self._staged_rm.get(okey, set())
 
     async def _get_backend(self) -> ListingBackend:
         if self._backend is None:
@@ -107,11 +185,112 @@ class SwarmFileSystem(AsyncFileSystem):
             self.dircache.pop(path, None)
         super().invalidate_cache(path)
 
+    # -------------------------------------------------------------- staging
+
+    def _guess_metadata(
+        self, sub: str, content_type: str | None = None, metadata: dict | None = None
+    ) -> dict[str, str]:
+        if metadata is not None:
+            return metadata
+        ct = content_type or mimetypes.guess_type(sub)[0] or "application/octet-stream"
+        return {"Content-Type": ct, "Filename": posixpath.basename(sub)}
+
+    def _stage_write(self, ref: str, sub: str, sw: StagedWrite) -> None:
+        okey = self._origin_of(ref)
+        self._staged.setdefault(okey, {})[sub] = sw
+        self._staged_rm.get(okey, set()).discard(sub)
+        self.invalidate_cache()
+
+    def _stage_rm(self, ref: str, sub: str) -> None:
+        okey = self._origin_of(ref)
+        self._staged.get(okey, {}).pop(sub, None)
+        self._staged_rm.setdefault(okey, set()).add(sub)
+        self.invalidate_cache()
+
+    def _unstage(self, ref: str, sub: str) -> None:
+        okey = self._origin_of(ref)
+        self._staged.get(okey, {}).pop(sub, None)
+        self._staged_rm.get(okey, set()).discard(sub)
+        self.invalidate_cache()
+
+    def discard_staged(self) -> None:
+        """Drop everything staged and uncommitted, on every lineage."""
+        for writes in self._staged.values():
+            for sw in writes.values():
+                sw.close()
+        self._staged.clear()
+        self._staged_rm.clear()
+        self.invalidate_cache()
+
+    async def _commit_root(self, ref: str) -> str | None:
+        """Commit staged operations for the lineage containing ``ref``.
+
+        Returns the new root reference, or None if nothing was staged.
+        Serialized under a lock so concurrent writers (e.g. zarr chunk
+        uploads) extend one lineage instead of forking it.
+        """
+        okey = self._origin_of(ref)
+        async with self._commit_lock:
+            writes = self._staged.pop(okey, {})
+            removes = self._staged_rm.pop(okey, set())
+            if not writes and not removes:
+                return None
+            head = self.latest(okey)
+            real_root = None if self._is_pseudo(head) else head
+            try:
+                res = await self._engine.commit(real_root, writes, removes, stamp=self.stamp)
+            except BaseException:
+                # a failed commit (e.g. no usable stamp) must not lose staged data
+                restored = self._staged.setdefault(okey, {})
+                for k, v in writes.items():
+                    restored.setdefault(k, v)
+                self._staged_rm.setdefault(okey, set()).update(removes)
+                raise
+            if res.new_root != head:
+                self._root_map[head] = res.new_root
+                self._origin[res.new_root] = okey
+            self.commit_log.append(res)
+        self.invalidate_cache()
+        return res.new_root
+
+    async def _commit_all(self) -> dict[str, str | None]:
+        results = {}
+        for okey in set(self._staged) | set(self._staged_rm):
+            results[okey] = await self._commit_root(okey)
+        return results
+
+    def commit_all(self) -> dict[str, str | None]:
+        """Commit everything staged; returns {origin root: new root}."""
+        return sync(self.loop, self._commit_all)
+
     # ------------------------------------------------------------------ info
 
     async def _info(self, path, **kwargs):
         path = self._strip_protocol(path)
         ref, sub = self._split_ref(path)
+        staged, removed = self._overlay(ref)
+        if not sub:
+            if not self._is_pseudo(ref):
+                backend = await self._get_backend()
+                st = await backend.stat(ref, "")
+                if st is None:
+                    raise FileNotFoundError(path)
+            return {"name": path, "type": "directory", "size": 0}
+        if sub in staged:
+            sw = staged[sub]
+            meta = sw.metadata or {}
+            return {
+                "name": path,
+                "type": "file",
+                "size": sw.size,
+                "staged": True,
+                "mimetype": meta.get("Content-Type"),
+                "metadata": meta,
+            }
+        if any(s.startswith(sub + "/") for s in staged):
+            return {"name": path, "type": "directory", "size": 0}
+        if sub in removed or self._is_pseudo(ref):
+            raise FileNotFoundError(path)
         backend = await self._get_backend()
         st = await backend.stat(ref, sub)
         if st is None:
@@ -141,38 +320,79 @@ class SwarmFileSystem(AsyncFileSystem):
                 except OSError:
                     e["size"] = None
 
-        await asyncio.gather(*(one(e) for e in entries if e["type"] == "file"))
+        await asyncio.gather(
+            *(
+                one(e)
+                for e in entries
+                if e["type"] == "file" and e["size"] is None and e.get("reference")
+            )
+        )
 
     async def _ls(self, path, detail=True, **kwargs):
         path = self._strip_protocol(path)
         if path not in self.dircache:
             ref, sub = self._split_ref(path)
-            backend = await self._get_backend()
-            res = await backend.list_dir(ref, sub)
-            if res is None:
-                # not a directory — a file (fsspec: ls of a file lists itself)
-                # or nonexistent (_info raises FileNotFoundError)
-                self.dircache[path] = [await self._info(path)]
-            else:
-                files, dirs = res
-                base = f"{path}/" if path else ""
-                # a name can be both a file and a directory in a Mantaray trie;
-                # keep the file entry (file wins, matching _info)
-                by_name = {
-                    f"{base}{d}": {"name": f"{base}{d}", "type": "directory", "size": 0}
-                    for d in dirs
-                }
-                for f in files:
-                    meta = f.metadata or {}
-                    name = f"{base}{f.path.decode('utf-8', 'surrogateescape')}"
-                    by_name[name] = {
-                        "name": name,
+            staged, removed = self._overlay(ref)
+            by_name: dict[str, dict] = {}
+            is_dir = self._is_pseudo(ref)  # pseudo roots are directories-in-progress
+            if not self._is_pseudo(ref):
+                backend = await self._get_backend()
+                res = await backend.list_dir(ref, sub)
+                if res is not None:
+                    is_dir = True
+                    files, dirs = res
+                    base = f"{path}/" if path else ""
+                    for d in dirs:
+                        by_name[f"{base}{d}"] = {
+                            "name": f"{base}{d}",
+                            "type": "directory",
+                            "size": 0,
+                        }
+                    # a name can be both a file and a directory in a Mantaray
+                    # trie; the file entry wins, matching _info
+                    for f in files:
+                        meta = f.metadata or {}
+                        name = f"{base}{f.path.decode('utf-8', 'surrogateescape')}"
+                        by_name[name] = {
+                            "name": name,
+                            "type": "file",
+                            "size": None,
+                            "reference": f.reference.hex(),
+                            "mimetype": meta.get("Content-Type"),
+                            "metadata": meta,
+                        }
+            # overlay staged writes and removals
+            prefix = f"{sub}/" if sub else ""
+            base = f"{path}/" if path else ""
+            for s in staged:
+                if prefix and not s.startswith(prefix):
+                    continue
+                rel = s[len(prefix) :]
+                is_dir = True
+                if "/" in rel:
+                    d = rel.split("/", 1)[0]
+                    by_name.setdefault(
+                        f"{base}{d}", {"name": f"{base}{d}", "type": "directory", "size": 0}
+                    )
+                else:
+                    sw = staged[s]
+                    meta = sw.metadata or {}
+                    by_name[f"{base}{rel}"] = {
+                        "name": f"{base}{rel}",
                         "type": "file",
-                        "size": None,
-                        "reference": f.reference.hex(),
+                        "size": sw.size,
+                        "staged": True,
                         "mimetype": meta.get("Content-Type"),
                         "metadata": meta,
                     }
+            for r in removed:
+                if (not prefix or r.startswith(prefix)) and "/" not in r[len(prefix) :]:
+                    by_name.pop(f"{base}{r[len(prefix):]}", None)
+            if not is_dir and not by_name:
+                # not a directory — a file (ls of a file lists itself) or
+                # nonexistent (_info raises FileNotFoundError)
+                self.dircache[path] = [await self._info(path)]
+            else:
                 entries = [by_name[name] for name in sorted(by_name)]
                 await self._fill_sizes(entries)
                 self.dircache[path] = entries
@@ -186,42 +406,69 @@ class SwarmFileSystem(AsyncFileSystem):
     async def _find(self, path, maxdepth=None, withdirs=False, detail=False, **kwargs):
         path = self._strip_protocol(path)
         ref, sub = self._split_ref(path)
-        backend = await self._get_backend()
+        staged, removed = self._overlay(ref)
+
+        def depth_ok(rel: str) -> bool:
+            return maxdepth is None or rel.count("/") + 1 <= maxdepth
 
         base = f"{path}/"
         out: dict[str, dict] = {}
-        st = await backend.stat(ref, sub)
-        if st is None:
-            raise FileNotFoundError(path)
-        if st.kind == "file":
-            out[path] = await self._info(path)
-        else:
-            prefix = f"{sub}/" if sub else ""
-            async for e in backend.iter_files(ref, prefix):
-                rel = e.path.decode("utf-8", "surrogateescape")
-                if maxdepth is not None and rel.count("/") + 1 > maxdepth:
-                    continue
-                meta = e.metadata or {}
-                name = base + rel
-                out[name] = {
-                    "name": name,
-                    "type": "file",
-                    "size": None,
-                    "reference": e.reference.hex(),
-                    "mimetype": meta.get("Content-Type"),
-                    "metadata": meta,
-                }
-            if detail:
-                await self._fill_sizes(list(out.values()))
-            if withdirs:
-                dirs: set[str] = set()
-                for name in out:
-                    parent = name.rsplit("/", 1)[0]
-                    while len(parent) > len(path):
-                        dirs.add(parent)
-                        parent = parent.rsplit("/", 1)[0]
-                for d in dirs:
-                    out[d] = {"name": d, "type": "directory", "size": 0}
+        if not self._is_pseudo(ref):
+            backend = await self._get_backend()
+            st = await backend.stat(ref, sub)
+            if st is None and not staged and not removed:
+                raise FileNotFoundError(path)
+            if st is not None and st.kind == "file":
+                if sub not in removed:
+                    out[path] = await self._info(path)
+            elif st is not None:
+                prefix = f"{sub}/" if sub else ""
+                async for e in backend.iter_files(ref, prefix):
+                    rel = e.path.decode("utf-8", "surrogateescape")
+                    if not depth_ok(rel):
+                        continue
+                    meta = e.metadata or {}
+                    name = base + rel
+                    out[name] = {
+                        "name": name,
+                        "type": "file",
+                        "size": None,
+                        "reference": e.reference.hex(),
+                        "mimetype": meta.get("Content-Type"),
+                        "metadata": meta,
+                    }
+        # overlay
+        prefix = f"{sub}/" if sub else ""
+        for s, sw in staged.items():
+            if prefix and not s.startswith(prefix):
+                continue
+            rel = s[len(prefix) :] if prefix else s
+            if not rel or not depth_ok(rel):
+                continue
+            meta = sw.metadata or {}
+            name = base + rel if rel != sub or prefix else path
+            out[name] = {
+                "name": name,
+                "type": "file",
+                "size": sw.size,
+                "staged": True,
+                "mimetype": meta.get("Content-Type"),
+                "metadata": meta,
+            }
+        for r in removed:
+            if not prefix or r.startswith(prefix):
+                out.pop(base + (r[len(prefix) :] if prefix else r), None)
+        if detail:
+            await self._fill_sizes(list(out.values()))
+        if withdirs:
+            dirs: set[str] = set()
+            for name in list(out):
+                parent = name.rsplit("/", 1)[0]
+                while len(parent) > len(path):
+                    dirs.add(parent)
+                    parent = parent.rsplit("/", 1)[0]
+            for d in dirs:
+                out[d] = {"name": d, "type": "directory", "size": 0}
         names = sorted(out)
         if detail:
             return {name: out[name] for name in names}
@@ -232,6 +479,14 @@ class SwarmFileSystem(AsyncFileSystem):
     async def _cat_file(self, path, start=None, end=None, **kwargs):
         path = self._strip_protocol(path)
         ref, sub = self._split_ref(path)
+        staged, removed = self._overlay(ref)
+        if sub in staged:
+            data = staged[sub].payload()
+            return data[start or 0 : end if end is not None else len(data)]
+        if sub in removed:
+            raise FileNotFoundError(path)
+        if self._is_pseudo(ref):
+            raise FileNotFoundError(path)
         if not sub:
             # bare reference: let Bee resolve the manifest's index document
             return await self.client.bzz_get(ref, "", start, end)
@@ -249,26 +504,82 @@ class SwarmFileSystem(AsyncFileSystem):
             os.makedirs(lpath, exist_ok=True)
             return
         info = await self._info(rpath)
+        if info.get("staged"):
+            data = await self._cat_file(rpath)
+            with open(lpath, "wb") as f:
+                f.write(data)
+            return
         with open(lpath, "wb") as f:
             async for chunk in self.client.bytes_iter(info["reference"]):
                 f.write(chunk)
 
     # ----------------------------------------------------------------- write
 
-    async def _pipe_file(self, path, value, **kwargs):
-        raise NotImplementedError(_WRITES_MSG)
+    async def _pipe_file(self, path, value, content_type=None, metadata=None, **kwargs):
+        path = self._strip_protocol(path)
+        ref, sub = self._split_ref(path)
+        if not sub:
+            raise IsADirectoryError("cannot write the manifest root; give a file path")
+        data = bytes(value)
+        sw = StagedWrite(
+            data=data, size=len(data), metadata=self._guess_metadata(sub, content_type, metadata)
+        )
+        self._stage_write(ref, sub, sw)
+        if not self._intrans:
+            await self._commit_root(ref)
 
-    async def _put_file(self, lpath, rpath, **kwargs):
-        raise NotImplementedError(_WRITES_MSG)
+    async def _put_file(self, lpath, rpath, content_type=None, **kwargs):
+        if os.path.isdir(lpath):
+            return
+        path = self._strip_protocol(rpath)
+        ref, sub = self._split_ref(path)
+        if not sub:
+            raise IsADirectoryError("cannot write the manifest root; give a file path")
+        spool = StagedWrite.spooled()
+        with open(lpath, "rb") as f:
+            shutil.copyfileobj(f, spool)
+        sw = StagedWrite(
+            data=spool, size=spool.tell(), metadata=self._guess_metadata(sub, content_type)
+        )
+        self._stage_write(ref, sub, sw)
+        if not self._intrans:
+            await self._commit_root(ref)
 
     async def _rm_file(self, path, **kwargs):
-        raise NotImplementedError(_WRITES_MSG)
+        path = self._strip_protocol(path)
+        ref, sub = self._split_ref(path)
+        if not sub:
+            raise IsADirectoryError("cannot remove the manifest root")
+        staged, removed = self._overlay(ref)
+        exists_remote = False
+        if not self._is_pseudo(ref):
+            backend = await self._get_backend()
+            st = await backend.stat(ref, sub)
+            if st is not None and st.kind == "directory":
+                return  # directories are implicit; they vanish with their files
+            exists_remote = st is not None and sub not in removed
+        if sub in staged:
+            self._unstage(ref, sub)
+        elif not exists_remote:
+            raise FileNotFoundError(path)
+        if exists_remote:
+            self._stage_rm(ref, sub)
+            if not self._intrans:
+                await self._commit_root(ref)
 
-    async def _mkdir(self, path, **kwargs):
-        raise NotImplementedError(_WRITES_MSG)
+    async def _cp_file(self, path1, path2, **kwargs):
+        info = await self._info(path1)
+        if info["type"] != "file":
+            raise IsADirectoryError(path1)
+        data = await self._cat_file(path1)
+        meta = info.get("metadata") or {}
+        await self._pipe_file(path2, data, content_type=meta.get("Content-Type"))
+
+    async def _mkdir(self, path, create_parents=True, **kwargs):
+        pass  # directories are implicit in Mantaray manifests
 
     async def _makedirs(self, path, exist_ok=False):
-        raise NotImplementedError(_WRITES_MSG)
+        pass
 
     # ------------------------------------------------------------------ open
 
@@ -282,8 +593,8 @@ class SwarmFileSystem(AsyncFileSystem):
         cache_options=None,
         **kwargs,
     ):
-        if mode != "rb":
-            raise NotImplementedError(_WRITES_MSG)
+        if mode not in ("rb", "wb"):
+            raise NotImplementedError(f"mode {mode!r} not supported (only rb/wb)")
         return SwarmFile(
             self,
             path,
@@ -297,21 +608,40 @@ class SwarmFileSystem(AsyncFileSystem):
 
 
 class SwarmFile(AbstractBufferedFile):
-    """Read-only file handle with range-based fetching.
+    """File handle: ranged reads against ``/bytes``; buffered, staged writes.
 
-    The path is resolved to its data reference once (at open, via ``info``);
-    every ``_fetch_range`` is then a direct ``/bytes`` range request, which is
-    what makes Parquet predicate pushdown and zarr chunk reads viable.
+    Reading resolves the path to its data reference once (at open), so every
+    ``_fetch_range`` is a direct range request — what makes Parquet predicate
+    pushdown and zarr chunk reads viable. Writing buffers to a spooled temp
+    file and stages it on close (committing immediately unless inside a
+    transaction).
     """
 
-    def __init__(self, fs: SwarmFileSystem, path: str, mode: str = "rb", **kwargs):
+    def __init__(
+        self,
+        fs: SwarmFileSystem,
+        path: str,
+        mode: str = "rb",
+        content_type: str | None = None,
+        metadata: dict[str, str] | None = None,
+        **kwargs,
+    ):
+        self._content_type = content_type
+        self._metadata = metadata
         super().__init__(fs, path, mode=mode, **kwargs)
-        self.reference: str | None = (self.details or {}).get("reference")
-        if self.size is None:
-            raise OSError(
-                f"could not determine size of {path}; the Bee endpoint at "
-                f"{fs.api_url} answered neither HEAD /bytes nor GET /chunks"
-            )
+        if mode == "rb":
+            self.reference: str | None = (self.details or {}).get("reference")
+            if self.size is None:
+                raise OSError(
+                    f"could not determine size of {path}; the Bee endpoint at "
+                    f"{fs.api_url} answered neither HEAD /bytes nor GET /chunks"
+                )
+        else:
+            stripped = fs._strip_protocol(path)
+            self._ref, self._sub = fs._split_ref(stripped)
+            if not self._sub:
+                raise IsADirectoryError(path)
+            self._spool = None
 
     def _fetch_range(self, start: int, end: int) -> bytes:
         if self.reference:
@@ -319,7 +649,24 @@ class SwarmFile(AbstractBufferedFile):
         return sync(self.fs.loop, self.fs._cat_file, self.path, start, end)
 
     def _initiate_upload(self):
-        raise NotImplementedError(_WRITES_MSG)
+        self._spool = StagedWrite.spooled()
 
     def _upload_chunk(self, final=False):
-        raise NotImplementedError(_WRITES_MSG)
+        self.buffer.seek(0)
+        shutil.copyfileobj(self.buffer, self._spool)
+        if final:
+            sw = StagedWrite(
+                data=self._spool,
+                size=self._spool.tell(),
+                metadata=self.fs._guess_metadata(self._sub, self._content_type, self._metadata),
+            )
+            self.fs._stage_write(self._ref, self._sub, sw)
+            if self.autocommit and not self.fs._intrans:
+                sync(self.fs.loop, self.fs._commit_root, self._ref)
+        return True
+
+    def commit(self):
+        pass  # the lineage-wide commit happens in SwarmTransaction.complete
+
+    def discard(self):
+        self.fs._unstage(self._ref, self._sub)
