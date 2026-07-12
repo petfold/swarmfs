@@ -122,6 +122,16 @@ chunk. This is the single biggest piece of real engineering in the project.
 - **Three-tier public API**: raw HTTP (documented curl example, no shame in it)
   → `swarmfs.SwarmClient` (exported; direct async Bee calls with the shared
   endpoint resolution, no filesystem semantics) → `SwarmFileSystem`/fsspec.
+  The middle tier has a blocking twin, `SyncSwarmClient` — the sync methods
+  are generated from SwarmClient's coroutines (same signatures/docs, kept in
+  lockstep by a test) and run on fsspec's shared background loop, the same
+  trick fsspec uses for the fs object. Client-tier open items, deliberately
+  not done yet: `stamp="auto"` resolution at this tier (safe — delegate to
+  the same StampManager, explicit stamp skips resolution; just not needed
+  yet) and exporting `VerifyingReader` for verified reads over an untrusted
+  endpoint (gateway *refusal* stays fs-only by decision: SwarmClient
+  endpoints are always explicit, so the silent-fallback risk it guards
+  against doesn't exist at this tier).
   Convenience methods reach straight down to `SwarmClient`, skipping the middle
   layer when it adds nothing — but the fs object stays the single enforcement
   point for stamp/gateway/verification policy. No swarmfs CLI: that's

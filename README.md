@@ -103,16 +103,18 @@ Three tiers, all backed by the same endpoint resolution
 
 - **`SwarmFileSystem` / fsspec URLs** — the default. Filesystem semantics,
   transactions, verification, and the whole data ecosystem for free.
-- **`swarmfs.SwarmClient`** — direct async calls against the Bee API
-  (upload a blob, fetch bytes, post a feed update) without filesystem
-  semantics or the fsspec import surface:
+- **`swarmfs.SyncSwarmClient` / `swarmfs.SwarmClient`** — direct calls
+  against the Bee API (upload a blob, fetch bytes, post a feed update)
+  without filesystem semantics. `SyncSwarmClient` is the blocking twin for
+  plain scripts; `SwarmClient` is the same surface as coroutines for
+  asyncio code:
 
   ```python
-  from swarmfs import SwarmClient
+  from swarmfs import SyncSwarmClient
 
-  client = SwarmClient()
-  ref = await client.bzz_post(open("photo.jpg", "rb"), stamp=batch_id)
-  data = await client.bytes_get(ref)
+  with SyncSwarmClient() as client:            # async? use SwarmClient + await
+      ref = client.bzz_post(open("photo.jpg", "rb"), stamp=batch_id)
+      data = client.bzz_get(ref, "photo.jpg")
   ```
 
 - **Raw HTTP** — the Bee API is plain HTTP; no library needed:

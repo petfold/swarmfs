@@ -2,7 +2,7 @@
 
 from fsspec import register_implementation
 
-from ._client import SwarmClient
+from ._client import SwarmClient, SyncSwarmClient
 from .core import SwarmFile, SwarmFileSystem
 from .exceptions import BeeAPIError, BeePermissionError, StampError, SwarmError
 from .feedfs import SwarmFeedFileSystem
@@ -13,6 +13,7 @@ __all__ = [
     "SwarmFeedFileSystem",
     "SwarmFile",
     "SwarmClient",
+    "SyncSwarmClient",
     "SwarmError",
     "BeeAPIError",
     "BeePermissionError",

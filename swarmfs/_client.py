@@ -1,10 +1,14 @@
-"""Thin async wrapper over the Bee HTTP API endpoints swarmfs needs."""
+"""Thin async wrapper over the Bee HTTP API endpoints swarmfs needs,
+plus its blocking twin for code that doesn't use asyncio."""
 
 from __future__ import annotations
 
+import functools
 import os
+import weakref
 
 import aiohttp
+from fsspec.asyn import get_loop, sync
 
 from .exceptions import BeeAPIError, BeePermissionError, StampError
 
@@ -307,3 +311,88 @@ class SwarmClient:
         async with session.get(url) as resp:
             await self._raise_for_status(resp, url)
             return await resp.json()
+
+
+# ------------------------------------------------------------- sync facade
+
+
+def _close_quietly(loop, client: SwarmClient) -> None:
+    if loop is not None and loop.is_running():
+        try:
+            sync(loop, client.close, timeout=0.1)
+        except Exception:
+            pass  # interpreter shutdown; the daemon loop dies with it
+
+
+class SyncSwarmClient:
+    """Blocking twin of ``SwarmClient``, for code that doesn't use asyncio.
+
+    Same endpoint resolution and the same methods (generated below, one per
+    ``SwarmClient`` coroutine, same signatures); each call runs on fsspec's
+    shared background event loop and blocks for the result. From async code
+    use ``SwarmClient`` directly — fsspec's ``sync`` raises rather than
+    deadlocks if called on the loop's own thread.
+
+    Usable as a context manager (``with SyncSwarmClient() as client:``);
+    otherwise the HTTP session is closed by a finalizer.
+    """
+
+    def __init__(
+        self,
+        api_url: str | None = None,
+        timeout: float = 120,
+        headers: dict[str, str] | None = None,
+        client: SwarmClient | None = None,
+    ):
+        self._client = client or SwarmClient(api_url, timeout=timeout, headers=headers)
+        self.api_url = self._client.api_url
+        self.loop = get_loop()
+        weakref.finalize(self, _close_quietly, self.loop, self._client)
+
+    def __enter__(self) -> "SyncSwarmClient":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Blocking ``SwarmClient.close`` — close the HTTP session."""
+        sync(self.loop, self._client.close)
+
+    def bytes_iter(self, ref: str, chunk_size: int = 1 << 20):
+        """Blocking iterator over ``SwarmClient.bytes_iter`` chunks."""
+        ait = self._client.bytes_iter(ref, chunk_size).__aiter__()
+        while True:
+            try:
+                yield sync(self.loop, ait.__anext__)
+            except StopAsyncIteration:
+                return
+
+
+def _sync_method(name: str):
+    coro = getattr(SwarmClient, name)
+
+    @functools.wraps(coro)
+    def method(self, *args, **kwargs):
+        return sync(self.loop, getattr(self._client, name), *args, **kwargs)
+
+    method.__doc__ = f"Blocking ``SwarmClient.{name}``. {coro.__doc__ or ''}"
+    return method
+
+
+for _name in (
+    "health",
+    "bytes_get",
+    "bytes_size",
+    "bzz_get",
+    "bytes_post",
+    "bzz_post",
+    "stamps_list",
+    "tag_create",
+    "tag_get",
+    "feed_head",
+    "chunk_get",
+    "soc_post",
+):
+    setattr(SyncSwarmClient, _name, _sync_method(_name))
+del _name

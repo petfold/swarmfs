@@ -159,6 +159,17 @@ def test_upload_download_live(tmp_path):
     assert fresh.cat_file(f"bzz://{dref}/sub/b.bin") == b"\x00\x01\x02"
 
 
+def test_sync_client_live():
+    """The blocking middle tier against a real node."""
+    from swarmfs import SyncSwarmClient
+
+    with SyncSwarmClient(api_url=BEE) as client:
+        assert client.health()["status"] == "ok"
+        if STAMP:
+            ref = client.bzz_post(b"sync facade\n", STAMP, filename="s.txt")
+            assert client.bzz_get(ref, "s.txt") == b"sync facade\n"
+
+
 @pytest.mark.skipif(not STAMP, reason="writes need SWARMFS_TEST_STAMP")
 def test_zarr_xarray_roundtrip_live():
     """v1 exit criterion on a real node: zarr store on Swarm, read via xarray."""
