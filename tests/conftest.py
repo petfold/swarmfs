@@ -77,8 +77,9 @@ class FakeClient:
         self.store = store
         self.api_url = "fake://"
         self.stamps = [GOOD_STAMP] if stamps is None else stamps
-        self.uploads: list[tuple[str, int]] = []  # (stamp, nbytes) per POST /bytes
-        self.redundancies: list[int | None] = []  # redundancy level per POST /bytes
+        self.uploads: list[tuple[str, int]] = []  # (stamp, nbytes) per POST /bytes|/bzz
+        self.redundancies: list[int | None] = []  # redundancy level per POST /bytes|/bzz
+        self.bzz_uploads: list[tuple] = []  # (filename, content_type, encrypt) per POST /bzz
 
     async def bytes_get(self, ref: str, start=None, end=None) -> bytes:
         data = self.store.get(bytes.fromhex(ref))
@@ -161,6 +162,45 @@ class FakeClient:
         self.uploads.append((stamp, len(data)))
         self.redundancies.append(redundancy)
         return ref.hex()
+
+    async def bzz_post(
+        self,
+        data,
+        stamp: str,
+        filename=None,
+        content_type=None,
+        encrypt=False,
+        pin=False,
+        redundancy=None,
+    ) -> str:
+        """Emulate Bee's single-file /bzz upload: store the content and wrap
+        it in a manifest with the filename as the index document."""
+        from swarmfs.mantaray import Node, add, save
+
+        if not isinstance(data, bytes):
+            data.seek(0)
+            data = data.read()
+        ref = hashlib.sha256(data).digest()
+        self.store[ref] = data
+        self.uploads.append((stamp, len(data)))
+        self.redundancies.append(redundancy)
+        name = filename or "file"
+        self.bzz_uploads.append((name, content_type, encrypt))
+        node = Node()
+        await add(
+            node,
+            name.encode(),
+            ref,
+            {"Content-Type": content_type or "application/octet-stream", "Filename": name},
+        )
+        await add(node, b"/", b"", {"website-index-document": name})
+
+        async def saver(d: bytes) -> bytes:
+            r = hashlib.sha256(d).digest()
+            self.store[r] = d
+            return r
+
+        return (await save(node, saver)).hex()
 
     async def stamps_list(self) -> list[dict]:
         return self.stamps

@@ -2,21 +2,36 @@
 
 from __future__ import annotations
 
+import os
+
 import aiohttp
+
+from .exceptions import BeeAPIError, BeePermissionError, StampError
 
 DEFAULT_API_URL = "http://localhost:1633"
 
 
 class SwarmClient:
-    """One instance per filesystem; the aiohttp session is created lazily on
-    the filesystem's event loop and closed via the filesystem's finalizer."""
+    """Async wrapper over the Bee HTTP API — the middle tier of swarmfs's API.
+
+    Use this when you want direct programmatic calls against Bee (upload a
+    blob, fetch bytes, post a feed update) without filesystem semantics or
+    the fsspec machinery. ``SwarmFileSystem`` builds everything on top of it,
+    one instance per filesystem; the aiohttp session is created lazily on
+    the calling event loop and closed via ``close()`` (the filesystem does
+    this from its finalizer).
+
+    The endpoint resolves as: explicit ``api_url`` → the ``BEE_API_URL``
+    environment variable → ``http://localhost:1633``.
+    """
 
     def __init__(
         self,
-        api_url: str = DEFAULT_API_URL,
+        api_url: str | None = None,
         timeout: float = 120,
         headers: dict[str, str] | None = None,
     ):
+        api_url = api_url or os.environ.get("BEE_API_URL") or DEFAULT_API_URL
         self.api_url = api_url.rstrip("/")
         self.timeout = timeout
         self.headers = headers or {}
@@ -54,9 +69,15 @@ class SwarmClient:
             pass
         if resp.status == 404:
             raise FileNotFoundError(what)
-        if resp.status in (401, 402, 403):
-            raise PermissionError(f"Bee API {resp.status} for {what}: {detail}")
-        raise OSError(f"Bee API {resp.status} for {what}: {detail}")
+        if resp.status == 402:
+            raise StampError(
+                f"Bee API 402 (payment required) for {what}: {detail} — the "
+                "endpoint did not accept the postage stamp; check your batches "
+                "with GET /stamps, or buy one (`swarm-cli stamp buy`)"
+            )
+        if resp.status in (401, 403):
+            raise BeePermissionError(resp.status, what, detail)
+        raise BeeAPIError(resp.status, what, detail)
 
     async def bytes_get(
         self, ref: str, start: int | None = None, end: int | None = None
@@ -174,6 +195,41 @@ class SwarmClient:
             headers["swarm-redundancy-level"] = str(redundancy)
         session = await self._get_session()
         async with session.post(url, data=data, headers=headers) as resp:
+            await self._raise_for_status(resp, url)
+            return (await resp.json())["reference"]
+
+    async def bzz_post(
+        self,
+        data,
+        stamp: str,
+        filename: str | None = None,
+        content_type: str | None = None,
+        encrypt: bool = False,
+        pin: bool = False,
+        redundancy: int | None = None,
+    ) -> str:
+        """POST /bzz — upload a single file, returns its reference (hex).
+
+        Bee wraps the file in a manifest with the filename as its index
+        document, so both ``/bzz/{ref}/`` and ``/bzz/{ref}/{filename}``
+        resolve to it. ``data`` may be bytes or a (binary) file object,
+        which aiohttp streams. With ``encrypt`` the returned reference is
+        128 hex chars (reference + decryption key).
+        """
+        url = f"{self.api_url}/bzz"
+        params = {"name": filename} if filename else {}
+        headers = {
+            "swarm-postage-batch-id": stamp,
+            "content-type": content_type or "application/octet-stream",
+        }
+        if encrypt:
+            headers["swarm-encrypt"] = "true"
+        if pin:
+            headers["swarm-pin"] = "true"
+        if redundancy is not None:
+            headers["swarm-redundancy-level"] = str(redundancy)
+        session = await self._get_session()
+        async with session.post(url, data=data, params=params, headers=headers) as resp:
             await self._raise_for_status(resp, url)
             return (await resp.json())["reference"]
 

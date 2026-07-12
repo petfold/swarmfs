@@ -133,6 +133,33 @@ def test_write_roundtrip_live():
 
 
 @pytest.mark.skipif(not STAMP, reason="writes need SWARMFS_TEST_STAMP")
+def test_upload_download_live(tmp_path):
+    """The hello-world: one-line upload returning a reference, download back."""
+    from swarmfs import SwarmFileSystem
+
+    fs = SwarmFileSystem(api_url=BEE, stamp=STAMP, skip_instance_cache=True)
+    local = tmp_path / "hello.txt"
+    local.write_bytes(b"hello from fs.upload\n")
+
+    ref = fs.upload(str(local))
+    assert len(ref) == 64
+    fs.download(f"bzz://{ref}/hello.txt", str(tmp_path / "copy.txt"))
+    assert (tmp_path / "copy.txt").read_bytes() == b"hello from fs.upload\n"
+    # single-file uploads resolve as the manifest's index document too
+    assert fs.cat(f"bzz://{ref}") == b"hello from fs.upload\n"
+
+    # a directory goes through the commit engine and yields one reference
+    d = tmp_path / "dataset"
+    (d / "sub").mkdir(parents=True)
+    (d / "a.txt").write_bytes(b"aaa")
+    (d / "sub" / "b.bin").write_bytes(b"\x00\x01\x02")
+    dref = fs.upload(str(d))
+    fresh = SwarmFileSystem(api_url=BEE, skip_instance_cache=True)
+    assert fresh.find(f"bzz://{dref}") == sorted([f"{dref}/a.txt", f"{dref}/sub/b.bin"])
+    assert fresh.cat_file(f"bzz://{dref}/sub/b.bin") == b"\x00\x01\x02"
+
+
+@pytest.mark.skipif(not STAMP, reason="writes need SWARMFS_TEST_STAMP")
 def test_zarr_xarray_roundtrip_live():
     """v1 exit criterion on a real node: zarr store on Swarm, read via xarray."""
     np = pytest.importorskip("numpy")

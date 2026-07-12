@@ -2,11 +2,23 @@
 
 from fsspec import register_implementation
 
+from ._client import SwarmClient
 from .core import SwarmFile, SwarmFileSystem
+from .exceptions import BeeAPIError, BeePermissionError, StampError, SwarmError
 from .feedfs import SwarmFeedFileSystem
 
 __version__ = "0.1.0.dev0"
-__all__ = ["SwarmFileSystem", "SwarmFeedFileSystem", "SwarmFile", "__version__"]
+__all__ = [
+    "SwarmFileSystem",
+    "SwarmFeedFileSystem",
+    "SwarmFile",
+    "SwarmClient",
+    "SwarmError",
+    "BeeAPIError",
+    "BeePermissionError",
+    "StampError",
+    "__version__",
+]
 
 # The pyproject entry points cover pip installs; registering on import too
 # makes editable/dev usage work without re-resolving entry points.

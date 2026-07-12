@@ -41,7 +41,8 @@ def _validate_ref(ref: str) -> None:
         raise ValueError(
             f"invalid swarm reference {ref!r}: expected 64 hex chars "
             "(or 128 for encrypted references), or 'new' for a fresh manifest. "
-            "ENS names are not supported yet."
+            "ENS names are not supported yet. To upload new content and get "
+            "its reference back, use fs.upload(local_path)."
         )
 
 
@@ -190,6 +191,14 @@ class SwarmFileSystem(AsyncFileSystem):
     def _split_ref(self, path: str) -> tuple[str, str]:
         """Split into (resolved root reference, subpath)."""
         ref, _, sub = path.partition("/")
+        if not ref:
+            raise ValueError(
+                "empty swarm reference: Swarm is content-addressed, so a write "
+                "destination does not exist until the network returns its "
+                "reference. Use fs.upload(local_path) to upload a file or "
+                "directory and get the new reference back, or write to "
+                "bzz://new/<path> and read fs.latest('new') afterwards."
+            )
         if not self._is_pseudo(ref):
             _validate_ref(ref)
         return self._resolve_head(ref), sub.strip("/")
@@ -700,6 +709,106 @@ class SwarmFileSystem(AsyncFileSystem):
 
     async def _makedirs(self, path, exist_ok=False):
         pass
+
+    # --------------------------------------------- one-shot upload / download
+
+    async def _upload(
+        self,
+        lpath: str,
+        content_type: str | None = None,
+        encrypt: bool = False,
+        redundancy: int | None = None,
+    ) -> str:
+        await self._setup()
+        lpath = os.path.expanduser(stringify_path(lpath))
+        red = self.redundancy if redundancy is None else redundancy
+        if red is not None and red not in range(5):
+            raise ValueError(f"redundancy must be 0-4, got {red!r}")
+
+        if os.path.isdir(lpath):
+            if encrypt:
+                raise NotImplementedError(
+                    "encrypt=True is only supported for single-file uploads; "
+                    "directory manifests are built client-side, unencrypted"
+                )
+            writes: dict[str, StagedWrite] = {}
+            for dirpath, _, files in os.walk(lpath):
+                for fname in files:
+                    full = os.path.join(dirpath, fname)
+                    rel = os.path.relpath(full, lpath).replace(os.sep, "/")
+                    spool = StagedWrite.spooled()
+                    with open(full, "rb") as f:
+                        shutil.copyfileobj(f, spool)
+                    writes[rel] = StagedWrite(
+                        data=spool, size=spool.tell(), metadata=self._guess_metadata(rel)
+                    )
+            if not writes:
+                raise FileNotFoundError(f"{lpath} is an empty directory; nothing to upload")
+            engine = self._engine
+            if red != engine.redundancy:
+                engine = CommitEngine(self.client, engine.stamps, pin=self.pin, redundancy=red)
+            res = await engine.commit(None, writes, [], stamp=self.stamp)
+            self.commit_log.append(res)
+            return res.new_root
+
+        # single file: one direct POST /bzz — no manifest construction, no
+        # transaction machinery; Bee wraps the file and returns the reference
+        batch = await self._engine.stamps.resolve(self.stamp)
+        ct = content_type or mimetypes.guess_type(lpath)[0] or "application/octet-stream"
+        with open(lpath, "rb") as f:
+            return await self.client.bzz_post(
+                f,
+                batch,
+                filename=os.path.basename(lpath),
+                content_type=ct,
+                encrypt=encrypt,
+                pin=self.pin,
+                redundancy=red,
+            )
+
+    def upload(
+        self,
+        lpath,
+        rpath=None,
+        recursive: bool = False,
+        content_type: str | None = None,
+        encrypt: bool = False,
+        redundancy: int | None = None,
+        **kwargs,
+    ) -> str | None:
+        """Upload a local file or directory to Swarm; returns the reference.
+
+        The one-liner: ``ref = fs.upload("photo.jpg")``. The postage stamp is
+        validated first (fail early), then a single file goes up as one direct
+        ``POST /bzz`` and a directory through the commit engine as a fresh
+        manifest; either way the new content's reference comes back as the
+        return value — on Swarm the destination address is the *result* of a
+        write, not its input. Always immediate: transactions don't defer it.
+
+        ``content_type`` overrides the filename-based guess (single file
+        only); ``encrypt`` asks Bee to encrypt (single file only; the returned
+        128-hex reference includes the decryption key); ``redundancy``
+        overrides the instance's erasure-coding level.
+
+        With ``rpath`` given this is fsspec's generic ``upload`` (an alias of
+        ``put``, targeting an existing manifest path) and returns None.
+        """
+        if rpath is not None:
+            return self.put(lpath, rpath, recursive=recursive, **kwargs)
+        return sync(
+            self.loop,
+            self._upload,
+            lpath,
+            content_type=content_type,
+            encrypt=encrypt,
+            redundancy=redundancy,
+        )
+
+    def download(self, rpath, lpath, recursive: bool = False, **kwargs):
+        """Download ``bzz://<reference>/<path>`` to a local file — an alias of
+        ``get`` (pass ``recursive=True`` for a whole directory). Reads need no
+        stamp; with verification active every chunk is BMT-checked."""
+        return self.get(rpath, lpath, recursive=recursive, **kwargs)
 
     # ------------------------------------------------------------------ open
 

@@ -9,10 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ._client import SwarmClient
-
-
-class StampError(RuntimeError):
-    """No usable postage stamp for a write."""
+from .exceptions import StampError  # noqa: F401 — canonical home; re-exported here
 
 
 @dataclass

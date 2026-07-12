@@ -100,6 +100,42 @@ chunk. This is the single biggest piece of real engineering in the project.
 - Removing a directory's last file prunes the empty intermediate nodes (deliberate,
   small deviation from bee's Remove, which leaves empty nodes behind).
 
+## Convenience surface & API tiers (decided, implemented)
+
+- **`fs.upload(local_path) -> str` / `fs.download(rpath, lpath)`** are the
+  hello-world one-liners; the README leads with them (the data-stack story comes
+  second — nobody trusts the killer feature until the trivial round trip works).
+  `upload` embraces the Swarm-native shape: the destination address is the
+  *result* of a write, returned as the value. A single file is one direct
+  `POST /bzz` through `SwarmClient` — deliberately NOT routed through the
+  commit engine or fsspec's generic machinery (they add nothing for one file);
+  a directory reuses the commit engine as a fresh manifest. Both paths hit
+  `StampManager` first (fail early) and respect gateway policy via `_setup`.
+  `upload(lpath, rpath)` (rpath given) keeps fsspec's base-class alias-of-put
+  contract; `download` is an alias of `get`.
+- **Generic `fs.put(local, "bzz://...")`** must never succeed in a way where the
+  caller can't recover the reference. A bare/invalid destination raises a
+  ValueError pointing at `fs.upload()` (and `bzz://new/…` + `fs.latest`). Put
+  into an existing manifest path works normally (stage + commit). The generic
+  `_get_file`/`_put_file` contract stays correct and tested — dask/rsync/
+  third-party code calls it without knowing it's Swarm.
+- **Three-tier public API**: raw HTTP (documented curl example, no shame in it)
+  → `swarmfs.SwarmClient` (exported; direct async Bee calls with the shared
+  endpoint resolution, no filesystem semantics) → `SwarmFileSystem`/fsspec.
+  Convenience methods reach straight down to `SwarmClient`, skipping the middle
+  layer when it adds nothing — but the fs object stays the single enforcement
+  point for stamp/gateway/verification policy. No swarmfs CLI: that's
+  swarm-cli's job (scope boundary, deliberate).
+- **Exception taxonomy** (`swarmfs/exceptions.py`, exported from the package
+  root): `SwarmError(OSError)` is the base for everything node/network —
+  OSError so fsspec's and our own `except OSError` seams keep working.
+  `BeeAPIError(SwarmError)` carries `.status`/`.url`/`.detail`;
+  `BeePermissionError(BeeAPIError, PermissionError)` for 401/403 (gateway
+  trust-detection catches it as before); 402 raises `StampError` — one type
+  for "no usable stamp" whether caught locally by StampManager or as a node
+  402. 404 stays builtin `FileNotFoundError` (fsspec semantics depend on it).
+  `StampError` now lives in exceptions.py, re-exported from `swarmfs.stamps`.
+
 ## Base class and async
 
 Subclass `fsspec.asyn.AsyncFileSystem` (the s3fs/gcsfs pattern) over `aiohttp`. fsspec

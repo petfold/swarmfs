@@ -11,43 +11,51 @@ URLs like `bzz://<reference>/path/to/file.parquet`.
 writes (postage stamps, every commit a snapshot), and mutable feed-backed
 `bzzf://` mounts. See the [roadmap](roadmap.md).
 
+## Upload and download a file
+
+You need a running [Bee light node](https://docs.ethswarm.org/docs/bee/installation/getting-started/)
+(`http://localhost:1633` by default) and, for uploads, a usable
+[postage stamp](https://docs.ethswarm.org/docs/develop/access-the-swarm/buy-a-stamp-batch):
+
 ```python
 import fsspec
 
-# immutable, content-addressed: every commit yields a new root reference
 fs = fsspec.filesystem("bzz", stamp="auto")
-with fs.transaction:
-    fs.pipe_file("bzz://new/dataset/a.parquet", data_a)
-    fs.pipe_file("bzz://new/dataset/b.parquet", data_b)
-root = fs.latest("new")          # share this reference; it never changes
 
-# mutable, feed-backed: a stable URL whose contents you can update
-ffs = fsspec.filesystem("bzzf", stamp="auto", signer="<private key hex>")
-ffs.pipe_file(f"bzzf://{owner}/my-app/config.json", b'{"v": 2}')
-# readers need no keys — and the URL never changes
+ref = fs.upload("photo.jpg")                    # → "c0ffee…" (64 hex chars)
+fs.download(f"bzz://{ref}/photo.jpg", "copy.jpg")
 ```
 
-## Usage
+On Swarm the address of new content is the *result* of a write, not its
+input — `upload` returns the new reference, and that reference is permanent:
+it names this exact content forever. Directories work the same way and come
+back as a single reference for the whole tree:
 
-The recommended setup is a local [Bee light node](https://docs.ethswarm.org/docs/bee/installation/getting-started/)
-— reads then come straight from the network with nothing to trust in between:
+```python
+ref = fs.upload("dataset/")
+fs.ls(f"bzz://{ref}")
+fs.download(f"bzz://{ref}", "dataset-copy/", recursive=True)
+```
+
+`upload` accepts `content_type=` (otherwise guessed from the filename),
+`encrypt=True` (single files; the returned 128-hex reference includes the
+decryption key), and `redundancy=0–4` (erasure coding, default 2). The stamp
+is validated before any byte moves, so a missing or expired stamp fails
+immediately with an actionable error.
+
+## The data ecosystem
+
+The point of being an fsspec backend: everything that speaks fsspec now
+speaks Swarm, with zero extra code.
 
 ```python
 import pandas as pd
 
-# against your local Bee node (http://localhost:1633 by default)
 df = pd.read_parquet("bzz://<64-hex-reference>/data.parquet")
+
+# local caching via URL chaining
+df = pd.read_parquet("simplecache::bzz://<reference>/big.parquet")
 ```
-
-The endpoint resolves as: `storage_options={"api_url": ...}` → the `BEE_API_URL`
-environment variable → `http://localhost:1633`. Pointing `api_url` at a public
-gateway is discouraged and requires an explicit `allow_gateway=True` — on that
-path swarmfs verifies every fetched chunk client-side against its BMT address
-(a Swarm reference *is* the content hash), so even an untrusted gateway can't
-tamper with what you read. Verification can also be forced on/off with
-`verify=True/False`.
-
-Or with fsspec directly:
 
 ```python
 import fsspec
@@ -62,12 +70,70 @@ with fs.open("bzz://<reference>/big.parquet", block_size=2**20) as f:
     f.read(8)
 ```
 
-URL chaining and mappers work out of the box:
+## Transactional writes
+
+For anything beyond a one-shot upload — building a dataset in place, changing
+one file inside a large collection — writes are copy-on-write commits: each
+commit patches the manifest trie client-side, re-uploads only what changed,
+and yields a new root. Old roots are untouched, so every commit is a snapshot.
 
 ```python
-# local caching, zero code
-pd.read_parquet("simplecache::bzz://<reference>/big.parquet")
+fs = fsspec.filesystem("bzz", stamp="auto")
+with fs.transaction:
+    fs.pipe_file("bzz://new/dataset/a.parquet", data_a)
+    fs.pipe_file("bzz://new/dataset/b.parquet", data_b)
+root = fs.latest("new")          # share this reference; it never changes
 ```
+
+## Mutable feeds (`bzzf://`)
+
+A feed gives you a stable URL whose contents you can update — the mutable
+filesystem on top of immutable commits:
+
+```python
+ffs = fsspec.filesystem("bzzf", stamp="auto", signer="<private key hex>")
+ffs.pipe_file(f"bzzf://{owner}/my-app/config.json", b'{"v": 2}')
+# readers need no keys — and the URL never changes
+```
+
+## Which API should I use?
+
+Three tiers, all backed by the same endpoint resolution
+(`api_url=...` → `$BEE_API_URL` → `http://localhost:1633`):
+
+- **`SwarmFileSystem` / fsspec URLs** — the default. Filesystem semantics,
+  transactions, verification, and the whole data ecosystem for free.
+- **`swarmfs.SwarmClient`** — direct async calls against the Bee API
+  (upload a blob, fetch bytes, post a feed update) without filesystem
+  semantics or the fsspec import surface:
+
+  ```python
+  from swarmfs import SwarmClient
+
+  client = SwarmClient()
+  ref = await client.bzz_post(open("photo.jpg", "rb"), stamp=batch_id)
+  data = await client.bytes_get(ref)
+  ```
+
+- **Raw HTTP** — the Bee API is plain HTTP; no library needed:
+
+  ```bash
+  curl -X POST -H "Swarm-Postage-Batch-Id: <batch>" \
+       --data-binary @photo.jpg http://localhost:1633/bzz?name=photo.jpg
+  ```
+
+  What the library adds over this: stamp validation up front, chunk
+  verification, gateway policy, better errors — the edge cases.
+
+## Nodes, gateways, verification
+
+The recommended setup is a local light node — reads then come straight from
+the network with nothing to trust in between. Pointing `api_url` at a public
+gateway is discouraged and requires an explicit `allow_gateway=True` — on
+that path swarmfs verifies every fetched chunk client-side against its BMT
+address (a Swarm reference *is* the content hash), so even an untrusted
+gateway can't tamper with what you read. Verification can also be forced
+on/off with `verify=True/False`.
 
 ## How it works
 
