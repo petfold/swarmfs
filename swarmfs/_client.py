@@ -1,0 +1,144 @@
+"""Thin async wrapper over the Bee HTTP API endpoints swarmfs needs."""
+
+from __future__ import annotations
+
+import aiohttp
+
+DEFAULT_API_URL = "http://localhost:1633"
+
+
+class SwarmClient:
+    """One instance per filesystem; the aiohttp session is created lazily on
+    the filesystem's event loop and closed via the filesystem's finalizer."""
+
+    def __init__(
+        self,
+        api_url: str = DEFAULT_API_URL,
+        timeout: float = 120,
+        headers: dict[str, str] | None = None,
+    ):
+        self.api_url = api_url.rstrip("/")
+        self.timeout = timeout
+        self.headers = headers or {}
+        self._session: aiohttp.ClientSession | None = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=self.timeout),
+                headers=self.headers,
+            )
+        return self._session
+
+    async def close(self) -> None:
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+
+    @staticmethod
+    def _range_header(start: int | None, end: int | None) -> dict[str, str]:
+        """fsspec's half-open [start, end) -> inclusive HTTP Range."""
+        if start is None and end is None:
+            return {}
+        start = start or 0
+        if end is None:
+            return {"Range": f"bytes={start}-"}
+        return {"Range": f"bytes={start}-{end - 1}"}
+
+    async def _raise_for_status(self, resp: aiohttp.ClientResponse, what: str) -> None:
+        if resp.status < 400:
+            return
+        detail = ""
+        try:
+            detail = (await resp.text())[:200]
+        except Exception:
+            pass
+        if resp.status == 404:
+            raise FileNotFoundError(what)
+        if resp.status in (401, 402, 403):
+            raise PermissionError(f"Bee API {resp.status} for {what}: {detail}")
+        raise OSError(f"Bee API {resp.status} for {what}: {detail}")
+
+    async def bytes_get(
+        self, ref: str, start: int | None = None, end: int | None = None
+    ) -> bytes:
+        """GET /bytes/{ref}, optionally a byte range (end exclusive)."""
+        if start is not None and end is not None and end <= start:
+            return b""
+        url = f"{self.api_url}/bytes/{ref}"
+        headers = self._range_header(start, end)
+        session = await self._get_session()
+        async with session.get(url, headers=headers) as resp:
+            if resp.status == 416:  # range beyond EOF
+                return b""
+            await self._raise_for_status(resp, url)
+            data = await resp.read()
+        if headers and resp.status == 200:
+            # server ignored the Range header; slice locally
+            data = data[start or 0 : end]
+        return data
+
+    async def bytes_size(self, ref: str) -> int | None:
+        """Size of the data at ``ref`` without downloading it.
+
+        Tries HEAD /bytes first; falls back to reading the root chunk's
+        8-byte span via /chunks (the span of a root chunk is the total
+        content length). Returns None if neither works (e.g. a restrictive
+        gateway).
+        """
+        session = await self._get_session()
+        url = f"{self.api_url}/bytes/{ref}"
+        try:
+            async with session.head(url) as resp:
+                await self._raise_for_status(resp, url)
+                length = resp.headers.get("Content-Length")
+                if length is not None:
+                    return int(length)
+        except FileNotFoundError:
+            raise
+        except OSError:
+            pass
+        try:
+            async with session.get(f"{self.api_url}/chunks/{ref}") as resp:
+                if resp.status >= 400:
+                    return None
+                chunk = await resp.read()
+            if len(chunk) >= 8:
+                return int.from_bytes(chunk[:8], "little")
+        except OSError:
+            pass
+        return None
+
+    async def bzz_get(
+        self, ref: str, path: str = "", start: int | None = None, end: int | None = None
+    ) -> bytes:
+        """GET /bzz/{ref}/{path} — server-side path resolution (follows the
+        manifest's index document when path is empty)."""
+        if start is not None and end is not None and end <= start:
+            return b""
+        url = f"{self.api_url}/bzz/{ref}/{path}"
+        headers = self._range_header(start, end)
+        session = await self._get_session()
+        async with session.get(url, headers=headers) as resp:
+            if resp.status == 416:
+                return b""
+            await self._raise_for_status(resp, url)
+            data = await resp.read()
+        if headers and resp.status == 200:
+            data = data[start or 0 : end]
+        return data
+
+    async def bytes_iter(self, ref: str, chunk_size: int = 1 << 20):
+        """Stream /bytes/{ref} in chunks (for downloads to local files)."""
+        url = f"{self.api_url}/bytes/{ref}"
+        session = await self._get_session()
+        async with session.get(url) as resp:
+            await self._raise_for_status(resp, url)
+            async for chunk in resp.content.iter_chunked(chunk_size):
+                yield chunk
+
+    async def health(self) -> dict:
+        url = f"{self.api_url}/health"
+        session = await self._get_session()
+        async with session.get(url) as resp:
+            await self._raise_for_status(resp, url)
+            return await resp.json()

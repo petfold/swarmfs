@@ -79,6 +79,43 @@ generates the sync interface automatically. Range requests: Bee supports HTTP Ra
 downloads — implement `_fetch_range` so fsspec block caching / readahead work, which is what
 makes Parquet predicate pushdown and zarr chunk reads viable.
 
+## Prior art: ipfsspec (study, don't copy wholesale)
+
+`ipfsspec` (IPFS backend in the official fsspec org) is the closest existing analog and
+confirms our core choices: it subclasses `fsspec.asyn.AsyncFileSystem`, implements
+`_cat_file`/`_ls`/etc. over an HTTP gateway, and registers `ipfs://` via entry points —
+exactly our pattern. Two instructive contrasts:
+
+1. It has stayed read-only, partly because writing to IPFS is awkward. Feeds + postage
+   stamps give us a genuinely writable `bzzf://` — we can *exceed* the IPFS analog, not
+   just match it.
+2. Its one big unfinished piece is UnixFS HAMT support (sharded large-directory listing)
+   — the direct analog of our Mantaray codec. This independently confirms that the
+   manifest/trie codec is the load-bearing, bug-prone part: tests first, never mock the
+   trie format.
+
+Before designing the v1 commit engine, also look at `ipfspy` (Algovera) — rougher, but it
+has a local-node write path. One ipfsspec pattern we deliberately do NOT adopt: public
+gateway selection/fallback (see next section).
+
+## Gateways, light nodes, and content verification (decided)
+
+- **Endpoint resolution order**, consistent across the codebase (same shape as
+  ipfsspec's convention): explicit `storage_options` (`api_url`) → `BEE_API_URL`
+  environment variable → default `http://localhost:1633`.
+- **Design stance: encourage running a light node, discourage gateways** — and the
+  software should encode this. The local-node default is itself the nudge. No
+  gateway-selection or silent-fallback behavior: when no node is reachable, fail with an
+  error that points the user toward running a light node. If gateway reads are supported
+  at all, they are an explicit opt-in (e.g. `allow_gateway=True`), never automatic.
+- **Content verification.** ipfsspec verifies fetched data against the CID; Swarm's
+  analog is that a reference is the BMT hash of the content, so chunks can be verified
+  client-side against their address. Against a trusted local Bee this is unnecessary
+  overhead; on the (discouraged, opt-in) gateway path it is what makes reads actually
+  trustless, and a real differentiator. Plan: an opt-in verification mode, likely v0/v1
+  for the gateway path, not necessarily on by default for local nodes. Frame it as
+  *mitigation for the discouraged gateway path*, not an endorsement of gateways.
+
 ## What falls out for free (validate these as acceptance demos)
 
 - `fs.get_mapper("bzz://ref/store")` → MutableMapping → **zarr on Swarm**. This is the
@@ -88,9 +125,10 @@ makes Parquet predicate pushdown and zarr chunk reads viable.
 
 ## Constraints / environment
 
-- Assume a local Bee node at `http://localhost:1633` by default; make it configurable.
-  Also support pointing at a public gateway (read-only, no stamp) — part of the data-people
-  story is "no node of my own."
+- Assume a local Bee node at `http://localhost:1633` by default; configurable per the
+  resolution order above. Gateway reads (read-only, no stamp) may exist for the
+  "no node of my own" crowd, but only as an explicit opt-in — the answer we lead with is
+  "run a light node" (see the gateways section above).
 - Target modern Python (3.10+). Keep runtime deps lean: `fsspec`, `aiohttp`. Everything else
   (numpy/zarr/pandas) is test/dev-only and optional.
 - Peter's context: comfortable with content-addressed tries over chunks (cf. his OntoDAG
