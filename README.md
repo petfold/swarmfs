@@ -154,6 +154,14 @@ viable. When Bee grows a server-side listing endpoint
 ([ethersphere/bee#5535](https://github.com/ethersphere/bee/issues/5535)) it
 will slot in behind the existing capability seam with no API change.
 
+## Compared to ipfsspec
+
+[ipfsspec](https://github.com/fsspec/ipfsspec), the closest analog in the
+fsspec ecosystem, is read-only by its own admission. Postage stamps make
+paid writes tractable on Swarm, so swarmfs adds a transactional write path
+and, via `bzzf://` feeds, a stable URL you can actually mutate — not just
+read.
+
 ## Development
 
 ```bash
