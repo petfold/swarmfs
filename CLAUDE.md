@@ -248,8 +248,10 @@ gateway selection/fallback (see next section).
   resolution order above. Gateway reads (read-only, no stamp) may exist for the
   "no node of my own" crowd, but only as an explicit opt-in — the answer we lead with is
   "run a light node" (see the gateways section above).
-- Target modern Python (3.10+). Keep runtime deps lean: `fsspec`, `aiohttp`. Everything else
-  (numpy/zarr/pandas) is test/dev-only and optional.
+- Target modern Python (3.11+ — floor raised from the original 3.10+ once CI showed
+  `zarr>=3`, a test dependency, has no release supporting 3.10; see Packaging & CI).
+  Keep runtime deps lean: `fsspec`, `aiohttp`. Everything else (numpy/zarr/pandas) is
+  test/dev-only and optional.
 - Peter's context: comfortable with content-addressed tries over chunks (cf. his OntoDAG
   `recordstore` work). Don't over-explain Swarm internals; do surface API-shape decisions.
 
@@ -262,7 +264,7 @@ gateway selection/fallback (see next section).
   for a first real release — the classifier signals maturity, the version
   string doesn't need to.
 - **CI**: `.github/workflows/tests.yml` runs the offline suite across Python
-  3.10–3.12 on push/PR (integration tests self-skip without
+  3.11–3.12 on push/PR (integration tests self-skip without
   `SWARMFS_TEST_BEE`, so no live Bee node is needed in CI), plus a `package`
   job that builds both artifacts, runs `twine check`, and asserts the sdist
   contains `LICENSE` and never contains `.claude/` — a direct regression

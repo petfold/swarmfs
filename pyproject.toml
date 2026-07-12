@@ -7,7 +7,7 @@ name = "swarmfs"
 version = "0.1.0"
 description = "fsspec backend for Ethereum Swarm (bzz://) via the Bee HTTP API"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "BSD-3-Clause" }
 authors = [{ name = "Peter Foldiak" }]
 keywords = ["swarm", "ethereum", "fsspec", "bee", "bzz", "filesystem"]
@@ -16,7 +16,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: System :: Filesystems",
