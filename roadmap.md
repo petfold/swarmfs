@@ -93,10 +93,13 @@ Goal: a stable, writable mount where the URL doesn't change as contents change.
       module docstring, not pretended otherwise.
 
 Exit criterion: two processes mounting the same `bzzf://` see each other's committed
-changes. **MET offline** (`test_feedfs.py::test_update_cycle_two_writers`, with real
-signature verification in the fake node); the live-node variant
-(`test_bzzf_two_mounts_live`) is written and gated — the local node was down when v2
-landed, run it when the node is back.
+changes. **MET** — offline (`test_feedfs.py::test_update_cycle_two_writers`, with real
+signature verification in the fake node) *and* live against Bee 2.8.1
+(`test_bzzf_two_mounts_live`): three mounts, real SOC signing, real network propagation
+(measured ~6 s on a light node — reads poll because Swarm is eventually consistent).
+The live run also flushed out a staleness bug: fsspec's dircache made `ls` skip feed
+re-resolution entirely, so listings never honored `feed_ttl`; bzzf now refreshes the
+feed before consulting the listing cache.
 
 ## Later / opportunistic
 

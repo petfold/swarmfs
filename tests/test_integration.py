@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import os
 import tarfile
+import time
 import urllib.request
 
 import pytest
@@ -159,6 +160,22 @@ def test_zarr_xarray_roundtrip_live():
     xr.testing.assert_identical(out, ds)
 
 
+def _poll(fn, expect, timeout=90, interval=3):
+    """Feed updates propagate through the network before they resolve
+    (~6 s on a light node measured); poll until visible or timed out."""
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        try:
+            last = fn()
+            if last == expect:
+                return last
+        except FileNotFoundError:
+            last = None
+        time.sleep(interval)
+    raise AssertionError(f"feed did not converge within {timeout}s: last={last!r}")
+
+
 @pytest.mark.skipif(not STAMP, reason="writes need SWARMFS_TEST_STAMP")
 def test_bzzf_two_mounts_live():
     """v2 exit criterion on a real node: two mounts of the same bzzf:// feed
@@ -178,9 +195,9 @@ def test_bzzf_two_mounts_live():
     )
     a.pipe_file(url, b"written by mount A")
 
-    # a keyless reader resolves the feed
-    reader = SwarmFeedFileSystem(api_url=BEE, skip_instance_cache=True)
-    assert reader.cat_file(url) == b"written by mount A"
+    # a keyless reader resolves the feed (eventually — Swarm is a network)
+    reader = SwarmFeedFileSystem(api_url=BEE, feed_ttl=0, skip_instance_cache=True)
+    _poll(lambda: reader.cat_file(url), b"written by mount A")
 
     # a second writer updates; the first mount sees it (last-write-wins)
     c = SwarmFeedFileSystem(
@@ -188,11 +205,14 @@ def test_bzzf_two_mounts_live():
     )
     c.pipe_file(url, b"updated by mount C")
     c.pipe_file(f"bzzf://{owner}/swarmfs-integration/extra.txt", b"more")
-    assert a.cat_file(url) == b"updated by mount C"
-    assert sorted(a.ls(f"bzzf://{owner}/swarmfs-integration", detail=False)) == [
-        f"{owner}/swarmfs-integration/extra.txt",
-        f"{owner}/swarmfs-integration/state.txt",
-    ]
+    _poll(lambda: a.cat_file(url), b"updated by mount C")
+    _poll(
+        lambda: sorted(a.ls(f"bzzf://{owner}/swarmfs-integration", detail=False)),
+        [
+            f"{owner}/swarmfs-integration/extra.txt",
+            f"{owner}/swarmfs-integration/state.txt",
+        ],
+    )
 
 
 @pytest.mark.skipif(not STAMP, reason="upload fixture needs SWARMFS_TEST_STAMP")

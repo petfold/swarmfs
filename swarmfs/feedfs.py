@@ -116,6 +116,14 @@ class SwarmFeedFileSystem(SwarmFileSystem):
             self.invalidate_cache()
         self._feed_state[key] = (upd.next_index, now + self.feed_ttl)
 
+    async def _ls(self, path, detail=True, **kwargs):
+        # resolve (and possibly adopt a newer feed head — which invalidates
+        # the dircache) BEFORE the cached-listing check in the base class,
+        # so listing freshness honors feed_ttl like cat/info do
+        stripped = self._strip_protocol(path)
+        await self._resolve_path(stripped)
+        return await super()._ls(stripped, detail=detail, **kwargs)
+
     # -------------------------------------------------------------- staging
 
     def _stage_write(self, ref, sub, sw):
