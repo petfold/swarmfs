@@ -41,8 +41,11 @@ df = pd.read_parquet("bzz://<64-hex-reference>/data.parquet")
 
 The endpoint resolves as: `storage_options={"api_url": ...}` → the `BEE_API_URL`
 environment variable → `http://localhost:1633`. Pointing `api_url` at a public
-gateway works for reads but is discouraged (you're trusting the gateway);
-opt-in client-side content verification for that path is on the roadmap.
+gateway is discouraged and requires an explicit `allow_gateway=True` — on that
+path swarmfs verifies every fetched chunk client-side against its BMT address
+(a Swarm reference *is* the content hash), so even an untrusted gateway can't
+tamper with what you read. Verification can also be forced on/off with
+`verify=True/False`.
 
 Or with fsspec directly:
 

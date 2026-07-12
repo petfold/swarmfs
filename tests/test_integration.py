@@ -160,6 +160,27 @@ def test_zarr_xarray_roundtrip_live():
     xr.testing.assert_identical(out, ds)
 
 
+@pytest.mark.skipif(not STAMP, reason="upload fixture needs SWARMFS_TEST_STAMP")
+def test_verified_reads_live(root_ref):
+    """verify=True against real content: manifest walk, full/range reads and
+    sizes all go through BMT-checked chunk fetches (incl. erasure-coded
+    spans and parity refs on multi-chunk files)."""
+    from swarmfs import SwarmFileSystem
+
+    vfs = SwarmFileSystem(api_url=BEE, verify=True, skip_instance_cache=True)
+    assert vfs.find(f"bzz://{root_ref}") == sorted(f"{root_ref}/{p}" for p in FILES)
+    content = FILES["data/a.bin"]  # 16 KiB -> multi-chunk tree
+    assert vfs.info(f"bzz://{root_ref}/data/a.bin")["size"] == len(content)
+    assert vfs.cat_file(f"bzz://{root_ref}/data/a.bin") == content
+    assert vfs.cat_file(
+        f"bzz://{root_ref}/data/a.bin", start=4000, end=8200
+    ) == content[4000:8200]
+    with vfs.open(f"bzz://{root_ref}/data/a.bin", block_size=2048) as f:
+        f.seek(-100, 2)
+        assert f.read() == content[-100:]
+    assert vfs.verify_active is True and vfs.trusted is True
+
+
 def _poll(fn, expect, timeout=90, interval=3):
     """Feed updates propagate through the network before they resolve
     (~6 s on a light node measured); poll until visible or timed out."""

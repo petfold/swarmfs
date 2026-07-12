@@ -152,23 +152,27 @@ Before designing the v1 commit engine, also look at `ipfspy` (Algovera) — roug
 has a local-node write path. One ipfsspec pattern we deliberately do NOT adopt: public
 gateway selection/fallback (see next section).
 
-## Gateways, light nodes, and content verification (decided)
+## Gateways, light nodes, and content verification (decided, implemented)
 
 - **Endpoint resolution order**, consistent across the codebase (same shape as
-  ipfsspec's convention): explicit `storage_options` (`api_url`) → `BEE_API_URL`
-  environment variable → default `http://localhost:1633`.
-- **Design stance: encourage running a light node, discourage gateways** — and the
-  software should encode this. The local-node default is itself the nudge. No
-  gateway-selection or silent-fallback behavior: when no node is reachable, fail with an
-  error that points the user toward running a light node. If gateway reads are supported
-  at all, they are an explicit opt-in (e.g. `allow_gateway=True`), never automatic.
-- **Content verification.** ipfsspec verifies fetched data against the CID; Swarm's
-  analog is that a reference is the BMT hash of the content, so chunks can be verified
-  client-side against their address. Against a trusted local Bee this is unnecessary
-  overhead; on the (discouraged, opt-in) gateway path it is what makes reads actually
-  trustless, and a real differentiator. Plan: an opt-in verification mode, likely v0/v1
-  for the gateway path, not necessarily on by default for local nodes. Frame it as
-  *mitigation for the discouraged gateway path*, not an endorsement of gateways.
+  ipfsspec's convention): explicit `storage_options` (`api_url`) → an injected client's
+  endpoint → `BEE_API_URL` environment variable → default `http://localhost:1633`.
+- **Design stance: encourage running a light node, discourage gateways** — encoded in
+  the software. First contact (`_setup`, once per instance) pings `/health`: an
+  unreachable endpoint fails with an error pointing at light-node setup, never a silent
+  gateway fallback. Trust detection: localhost is trusted; elsewhere the node-owner API
+  (`/stamps`) is probed — blocked means "gateway", refused unless `allow_gateway=True`.
+- **Content verification** (`swarmfs/join.py`): a verifying joiner walks the Swarm hash
+  tree over `/chunks`, BMT-checking every chunk against the reference it was fetched by;
+  range reads descend only the subtrees they need, so Parquet/zarr access stays viable.
+  Manifest walks verify too (the listing loader routes through the same reader), and
+  bzzf feed updates get full SOC verification (address + owner-signature recovery).
+  `verify=None` (default) auto-resolves: **on for gateways, off for a trusted node**;
+  either can be forced. Facts learned live: the BMT address covers the stored span
+  as-is (erasure-coding level bits included), and intermediate chunks carry parity refs
+  after the `ceil(span/unit)` data refs — traversal takes only the data refs. Bare-ref
+  reads (`/bzz` index-document resolution) are refused under verification — they resolve
+  server-side and cannot be checked.
 
 ## What falls out for free (validate these as acceptance demos)
 

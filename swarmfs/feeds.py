@@ -58,6 +58,41 @@ def soc_address(identifier: bytes, owner: bytes) -> bytes:
     return keccak256(identifier + owner)
 
 
+def verify_soc(data: bytes, owner: bytes, address: bytes) -> None:
+    """Full client-side check of a single-owner chunk: address derivation,
+    and recovery of the owner from the signature over the wrapped chunk's
+    BMT address — exactly what a Bee node checks on upload."""
+    from .join import VerificationError
+
+    try:
+        from eth_keys import keys
+    except ImportError as e:  # pragma: no cover
+        raise VerificationError(
+            "verifying feed updates requires the 'feeds' extra: "
+            "pip install 'swarmfs[feeds]'"
+        ) from e
+    if len(data) < SOC_PAYLOAD_OFFSET:
+        raise VerificationError(f"single-owner chunk too short: {len(data)} bytes")
+    identifier = data[:SOC_IDENTIFIER_SIZE]
+    sig = data[SOC_IDENTIFIER_SIZE:SOC_SPAN_OFFSET]
+    cac = data[SOC_SPAN_OFFSET:]
+    if soc_address(identifier, owner) != address:
+        raise VerificationError("single-owner chunk does not match its address")
+    digest = keccak256(identifier + chunk_address(cac))
+    prefixed = keccak256(b"\x19Ethereum Signed Message:\n32" + digest)
+    recovered = keys.Signature(
+        vrs=(
+            sig[64] - 27,
+            int.from_bytes(sig[:32], "big"),
+            int.from_bytes(sig[32:64], "big"),
+        )
+    ).recover_public_key_from_msg_hash(prefixed)
+    if recovered.to_canonical_address() != owner:
+        raise VerificationError(
+            "feed update signature was not made by the feed owner"
+        )
+
+
 class FeedSigner:
     """Signs feed updates with the owner's private key (eth-keys)."""
 
@@ -102,13 +137,19 @@ class FeedOps:
     def __init__(self, client: SwarmClient):
         self.client = client
 
-    async def latest(self, owner: bytes, topic: bytes) -> FeedUpdate | None:
+    async def latest(
+        self, owner: bytes, topic: bytes, verify: bool = False
+    ) -> FeedUpdate | None:
         """Resolve the latest update, or None for a never-written feed.
 
         Bee's server-side sequence lookup finds the current index (returned
         in the Swarm-Feed-Index header); we then fetch the SOC chunk at that
         index ourselves and extract the reference from its payload — exact
         and independent of how the /feeds body resolves the content.
+
+        With ``verify=True`` the SOC is fully checked client-side (address
+        derivation and owner-signature recovery), so an untrusted endpoint
+        cannot forge a feed update.
         """
         head = await self.client.feed_head(owner.hex(), topic.hex())
         if head is None:
@@ -118,9 +159,10 @@ class FeedOps:
         next_index = (
             int.from_bytes(bytes.fromhex(next_hex), "big") if next_hex else index + 1
         )
-        soc = await self.client.chunk_get(
-            soc_address(feed_identifier(topic, index), owner).hex()
-        )
+        address = soc_address(feed_identifier(topic, index), owner)
+        soc = await self.client.chunk_get(address.hex())
+        if verify:
+            verify_soc(soc, owner, address)
         reference = self._reference_from_soc(soc)
         return FeedUpdate(reference=reference, index=index, next_index=next_index)
 

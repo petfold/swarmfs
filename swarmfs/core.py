@@ -86,6 +86,14 @@ class SwarmFileSystem(AsyncFileSystem):
         pick the usable batch with the longest TTL at commit time.
     pin:
         Ask the node to pin uploaded content locally.
+    allow_gateway:
+        Explicitly permit using an endpoint that is not your own node.
+        Endpoints where the node-owner API (``/stamps``) is unreachable are
+        treated as gateways and refused unless this is set — run a light
+        node instead if you can.
+    verify:
+        Client-side chunk verification (BMT-hash every fetched chunk against
+        its reference). Default: on for gateways, off for your own node.
     client:
         Injection seam for a pre-built ``SwarmClient`` (used by tests).
     """
@@ -102,17 +110,28 @@ class SwarmFileSystem(AsyncFileSystem):
         headers: dict[str, str] | None = None,
         stamp: str | None = None,
         pin: bool = False,
+        allow_gateway: bool = False,
+        verify: bool | None = None,
         client: SwarmClient | None = None,
         asynchronous: bool = False,
         loop=None,
         **storage_options,
     ):
         super().__init__(asynchronous=asynchronous, loop=loop, **storage_options)
-        self.api_url = api_url or os.environ.get("BEE_API_URL", DEFAULT_API_URL)
+        # an injected client's endpoint wins over the env/default so trust
+        # detection judges the endpoint actually in use
+        self.api_url = api_url or (
+            client.api_url if client is not None else None
+        ) or os.environ.get("BEE_API_URL", DEFAULT_API_URL)
         self.client = client or SwarmClient(self.api_url, timeout=timeout, headers=headers)
         self.block_size = block_size or 2**20
         self.stamp = stamp
         self.pin = pin
+        self.allow_gateway = allow_gateway
+        self.verify = verify
+        self.verify_active: bool | None = None  # resolved by _setup
+        self._reader = None  # client, or a VerifyingReader over it
+        self._setup_done = False
         self._backend: ListingBackend | None = None
         self._engine = CommitEngine(self.client, StampManager(self.client), pin=pin)
         # staging, keyed by the *origin* root of each manifest lineage
@@ -181,9 +200,64 @@ class SwarmFileSystem(AsyncFileSystem):
         okey = self._origin_of(ref)
         return self._staged.get(okey, {}), self._staged_rm.get(okey, set())
 
+    async def _setup(self) -> None:
+        """First-contact checks, once per instance: reachability (with a
+        useful error), gateway detection, and verification mode."""
+        if self._setup_done:
+            return
+        import aiohttp
+        from urllib.parse import urlsplit
+
+        try:
+            await self.client.health()
+        except aiohttp.ClientConnectionError as e:
+            raise ConnectionError(
+                f"cannot reach a Bee node at {self.api_url} ({e}). swarmfs expects "
+                "a node you run yourself — a local light node is quick to set up: "
+                "https://docs.ethswarm.org/docs/bee/installation/quick-start. "
+                "If your node runs elsewhere, pass api_url=... or set BEE_API_URL."
+            ) from e
+        except OSError:
+            pass  # endpoint reachable but blocks /health (some gateways)
+
+        host = urlsplit(self.api_url).hostname
+        if host in ("localhost", "127.0.0.1", "::1"):
+            trusted = True
+        else:
+            try:
+                await self.client.stamps_list()
+                trusted = True
+            except OSError:
+                trusted = False  # node-owner API blocked: a gateway
+        if not trusted and not self.allow_gateway:
+            raise PermissionError(
+                f"{self.api_url} looks like a public gateway (the node-owner API "
+                "is not accessible). swarmfs encourages running your own light "
+                "node: https://docs.ethswarm.org/docs/bee/installation/quick-start. "
+                "To read through this gateway anyway, pass allow_gateway=True "
+                "(chunk verification is then enabled by default)."
+            )
+        self.trusted = trusted
+        self.verify_active = self.verify if self.verify is not None else not trusted
+        if self.verify_active:
+            from .join import VerifyingReader
+
+            self._reader = VerifyingReader(self.client)
+        else:
+            self._reader = self.client
+        self._setup_done = True
+
+    async def _get_reader(self):
+        await self._setup()
+        return self._reader
+
+    async def _read_reference(self, ref: str, start=None, end=None) -> bytes:
+        return await (await self._get_reader()).bytes_get(ref, start, end)
+
     async def _get_backend(self) -> ListingBackend:
         if self._backend is None:
-            self._backend = await detect_listing_backend(self.client)
+            await self._setup()
+            self._backend = await detect_listing_backend(self._reader)
         return self._backend
 
     def invalidate_cache(self, path=None):
@@ -329,7 +403,7 @@ class SwarmFileSystem(AsyncFileSystem):
             return {
                 "name": path,
                 "type": "file",
-                "size": await self.client.bytes_size(st.reference.hex()),
+                "size": await (await self._get_reader()).bytes_size(st.reference.hex()),
                 "reference": st.reference.hex(),
                 "mimetype": meta.get("Content-Type"),
                 "metadata": meta,
@@ -344,7 +418,7 @@ class SwarmFileSystem(AsyncFileSystem):
         async def one(e: dict) -> None:
             async with sem:
                 try:
-                    e["size"] = await self.client.bytes_size(e["reference"])
+                    e["size"] = await (await self._get_reader()).bytes_size(e["reference"])
                 except OSError:
                     e["size"] = None
 
@@ -517,6 +591,14 @@ class SwarmFileSystem(AsyncFileSystem):
             raise FileNotFoundError(path)
         if not sub:
             # bare reference: let Bee resolve the manifest's index document
+            await self._setup()
+            if self.verify_active:
+                from .join import VerificationError
+
+                raise VerificationError(
+                    "bare-reference reads resolve server-side (/bzz) and cannot "
+                    "be verified — address the file by its explicit path"
+                )
             return await self.client.bzz_get(ref, "", start, end)
         backend = await self._get_backend()
         st = await backend.stat(ref, sub)
@@ -525,7 +607,7 @@ class SwarmFileSystem(AsyncFileSystem):
         if st.kind != "file":
             raise IsADirectoryError(path)
         assert st.reference is not None
-        return await self.client.bytes_get(st.reference.hex(), start, end)
+        return await (await self._get_reader()).bytes_get(st.reference.hex(), start, end)
 
     async def _get_file(self, rpath, lpath, **kwargs):
         if await self._isdir(rpath):
@@ -538,7 +620,7 @@ class SwarmFileSystem(AsyncFileSystem):
                 f.write(data)
             return
         with open(lpath, "wb") as f:
-            async for chunk in self.client.bytes_iter(info["reference"]):
+            async for chunk in (await self._get_reader()).bytes_iter(info["reference"]):
                 f.write(chunk)
 
     # ----------------------------------------------------------------- write
@@ -672,7 +754,7 @@ class SwarmFile(AbstractBufferedFile):
 
     def _fetch_range(self, start: int, end: int) -> bytes:
         if self.reference:
-            return sync(self.fs.loop, self.fs.client.bytes_get, self.reference, start, end)
+            return sync(self.fs.loop, self.fs._read_reference, self.reference, start, end)
         return sync(self.fs.loop, self.fs._cat_file, self.path, start, end)
 
     def _initiate_upload(self):

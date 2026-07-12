@@ -14,7 +14,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import AsyncIterator
 
-from ._client import SwarmClient
 from .mantaray import FileEntry, NodeStore, iter_files, list_directory, locate
 
 
@@ -51,11 +50,14 @@ class ListingBackend(ABC):
 
 class MantarayListingBackend(ListingBackend):
     """Client-side Mantaray trie traversal via GET /bytes (works against
-    today's Bee and public gateways)."""
+    today's Bee and public gateways).
 
-    def __init__(self, client: SwarmClient, cache_size: int = 4096):
+    ``reader`` is the raw client or a VerifyingReader — with the latter,
+    manifest nodes are chunk-verified too, so listings are trustless."""
+
+    def __init__(self, reader, cache_size: int = 4096):
         # keyed by reference (content-addressed), safe to share across roots
-        self.store = NodeStore(load=lambda ref: client.bytes_get(ref.hex()), cache_size=cache_size)
+        self.store = NodeStore(load=lambda ref: reader.bytes_get(ref.hex()), cache_size=cache_size)
 
     async def stat(self, root: str, path: str) -> Stat | None:
         root_ref = bytes.fromhex(root)
@@ -93,6 +95,6 @@ class MantarayListingBackend(ListingBackend):
             yield e
 
 
-async def detect_listing_backend(client: SwarmClient) -> ListingBackend:
+async def detect_listing_backend(reader) -> ListingBackend:
     # TODO(bee#5535): probe for the server-side listing endpoint and prefer it.
-    return MantarayListingBackend(client)
+    return MantarayListingBackend(reader)

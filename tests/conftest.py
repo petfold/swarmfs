@@ -169,8 +169,83 @@ class FakeClient:
     async def tag_get(self, uid: int) -> dict:
         return {"uid": uid}
 
+    async def health(self) -> dict:
+        return {"status": "ok", "version": "fake"}
+
     async def close(self) -> None:
         pass
+
+
+class FakeGatewayClient(FakeClient):
+    """Read-only endpoint that blocks the node-owner API, like a public
+    gateway: /stamps is not available, so trust detection must fail."""
+
+    def __init__(self, store):
+        super().__init__(store)
+        self.api_url = "https://gateway.example"
+
+    async def stamps_list(self):
+        raise PermissionError("403 for /stamps (gateway)")
+
+
+def split_content(data: bytes, store: dict[bytes, bytes]) -> bytes:
+    """Split content into a Swarm hash tree with genuine BMT addresses —
+    the inverse of the verifying joiner. Returns the root reference."""
+    from swarmfs.bmt import chunk_address
+
+    def put(chunk: bytes) -> bytes:
+        ref = chunk_address(chunk)
+        store[ref] = chunk
+        return ref
+
+    if not data:
+        return put(bytes(8))
+    level: list[tuple[bytes, int]] = []
+    for i in range(0, len(data), 4096):
+        part = data[i : i + 4096]
+        level.append((put(len(part).to_bytes(8, "little") + part), len(part)))
+    while len(level) > 1:
+        nxt = []
+        for i in range(0, len(level), 128):
+            group = level[i : i + 128]
+            if len(group) == 1:
+                # single children are promoted, not wrapped (bee's splitter
+                # does the same; the joiner treats span<=4096 as a leaf)
+                nxt.append(group[0])
+                continue
+            span = sum(s for _, s in group)
+            payload = b"".join(r for r, _ in group)
+            nxt.append((put(span.to_bytes(8, "little") + payload), span))
+        level = nxt
+    return level[0][0]
+
+
+def build_manifest_ca(
+    files: dict[str, bytes],
+    metadata: dict[str, dict[str, str]] | None = None,
+) -> tuple[str, dict[bytes, bytes]]:
+    """Like build_manifest, but everything is stored under its genuine BMT
+    address (manifest nodes as single chunks, contents split into trees),
+    so the verifying read path can check every fetch."""
+    from swarmfs.bmt import cac_data, chunk_address
+
+    store: dict[bytes, bytes] = {}
+
+    async def saver(data: bytes) -> bytes:
+        assert len(data) <= 4096, "manifest node exceeds one chunk (unsupported in fixture)"
+        chunk = cac_data(data)
+        ref = chunk_address(chunk)
+        store[ref] = chunk
+        return ref
+
+    async def build() -> bytes:
+        root = Node()
+        for path, content in files.items():
+            entry = split_content(content, store)
+            await add(root, path.encode(), entry, (metadata or {}).get(path))
+        return await save(root, saver)
+
+    return asyncio.run(build()).hex(), store
 
 
 @pytest.fixture()

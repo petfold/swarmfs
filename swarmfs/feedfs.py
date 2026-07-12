@@ -100,9 +100,10 @@ class SwarmFeedFileSystem(SwarmFileSystem):
         state = self._feed_state.get(key)
         if state is not None and state[1] > now:
             return
-        upd = await self._feeds.latest(owner, topic)
+        await self._setup()
+        upd = await self._feeds.latest(owner, topic, verify=bool(self.verify_active))
         if upd is None:
-            self._feed_state[key] = (0, now + self.feed_ttl)
+            self._bump_feed_state(key, 0)
             return
         head = self._resolve_head(key)
         if head == key:
@@ -114,7 +115,15 @@ class SwarmFeedFileSystem(SwarmFileSystem):
             self._root_map[head] = upd.reference
             self._origin[upd.reference] = key
             self.invalidate_cache()
-        self._feed_state[key] = (upd.next_index, now + self.feed_ttl)
+        self._bump_feed_state(key, upd.next_index)
+
+    def _bump_feed_state(self, key: str, next_index: int) -> None:
+        """Advance (never regress) the next-index counter. Feed lookups lag
+        our own freshly-published updates while they propagate, so the local
+        counter is the floor — without it, back-to-back commits would
+        re-publish the same index and the second SOC would be dropped."""
+        current = self._feed_state.get(key, (0, 0.0))[0]
+        self._feed_state[key] = (max(current, next_index), time.monotonic() + self.feed_ttl)
 
     async def _ls(self, path, detail=True, **kwargs):
         # resolve (and possibly adopt a newer feed head — which invalidates
@@ -160,11 +169,14 @@ class SwarmFeedFileSystem(SwarmFileSystem):
             return
         owner, topic = self._feed_identity[okey]
         assert self.signer is not None  # enforced at staging time
-        # re-check the head index right before publishing: another writer may
-        # have advanced the feed since our cached lookup (last-write-wins)
+        # the next index is the max of a fresh lookup (another writer may
+        # have advanced the feed — last-write-wins) and our own counter
+        # (lookups lag our own just-published updates while they propagate)
         head = await self.client.feed_head(owner.hex(), topic.hex())
-        next_index = int.from_bytes(bytes.fromhex(head[0]), "big") + 1 if head else 0
+        looked_up = int.from_bytes(bytes.fromhex(head[0]), "big") + 1 if head else 0
+        local = self._feed_state.get(okey, (0, 0.0))[0]
+        next_index = max(looked_up, local)
         await self._feeds.update(
             self.signer, topic, next_index, result.new_root, stamp=result.batch
         )
-        self._feed_state[okey] = (next_index + 1, time.monotonic() + self.feed_ttl)
+        self._bump_feed_state(okey, next_index + 1)

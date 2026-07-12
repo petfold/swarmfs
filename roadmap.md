@@ -30,9 +30,9 @@ Goal: `pd.read_parquet("bzz://<ref>/data.parquet")` and
 - [x] Read-only against a live node — integration tests in `tests/test_integration.py`
       (gated on `SWARMFS_TEST_BEE`/`SWARMFS_TEST_STAMP`) pass against a real Bee 2.8.1 node:
       upload collection → find/ls/cat/range read round-trips.
-- [ ] **Public gateway** as an explicit opt-in (`allow_gateway=True` or similar — never
-      automatic; when no node is reachable, fail with a message pointing at running a light
-      node. See the gateways section in `CLAUDE.md`). Still to build.
+- [x] **Public gateway** as an explicit opt-in (`allow_gateway=True` — never automatic;
+      unreachable endpoints fail with a message pointing at running a light node; trust
+      detection probes the node-owner API). See the gateways section in `CLAUDE.md`.
 - [x] Demos as tests: pandas single Parquet ✓; dask partitioned Parquet (exercises `find`)
       ✓ offline *and* against a live node; `simplecache::bzz://…` chaining ✓.
 
@@ -56,10 +56,11 @@ Goal: write a collection, get a new root reference back, read it.
       build/patch manifest, return new root. (Reviewed `ipfspy` first: it proxies IPFS's
       server-side MFS per-op — no staging, no atomicity — confirming our client-side
       staged-commit contrast.) Tags/progress reporting not wired yet — later.
-- [ ] Opt-in client-side chunk verification (BMT hash of fetched data vs. its reference)
-      for the gateway read path — mitigation for the discouraged-but-supported gateway
-      mode, not on by default for local nodes. May pull forward into v0 if gateway opt-in
-      lands there.
+- [x] Opt-in client-side chunk verification (BMT hash of fetched data vs. its reference):
+      `swarmfs/join.py`, a verifying joiner with subtree-pruned range reads; manifest
+      walks and bzzf SOC updates verified too. Auto: on for gateways, off for trusted
+      nodes; forcible either way. Validated live (incl. erasure-coded spans and parity
+      refs in intermediate chunks — both discovered against the real node).
 - [x] Wire fsspec `transaction` → deferred commit (one commit per manifest lineage;
       rollback discards without uploading). `_pipe_file`, `_put_file`, `_rm`, `_mkdir`,
       `open("wb")`, `_cp_file` defined for copy-on-write. Root lineage model: `bzz://new/…`
@@ -128,10 +129,10 @@ feed before consulting the listing cache.
 
 ## Open decisions to revisit
 
-- Exact `storage_options` schema (api url, stamp, signer, gateway mode, redundancy).
-  Endpoint resolution order is decided (`storage_options` → `BEE_API_URL` → localhost:1633);
-  still open: the gateway opt-in flag name (`allow_gateway`?), how to detect "this endpoint
-  is a gateway, not my node", and the error copy that points users at light-node setup.
+- Exact `storage_options` schema — mostly settled now: `api_url`, `stamp`, `pin`,
+  `signer`, `feed_ttl`, `allow_gateway`, `verify`, `block_size`, `timeout`, `headers`.
+  Gateway detection = probe of the node-owner API (`/stamps`); error copy points at
+  light-node setup. Remaining: redundancy level as a write kwarg (still "later").
 - Whether `bzz://` writes should error loudly ("captured the new ref?") vs. return it quietly.
 - Where the local write spool lives and its cleanup policy.
 - Mantaray metadata key conventions to emit on write (align with any upstream standardization).
