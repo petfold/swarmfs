@@ -253,6 +253,29 @@ gateway selection/fallback (see next section).
 - Peter's context: comfortable with content-addressed tries over chunks (cf. his OntoDAG
   `recordstore` work). Don't over-explain Swarm internals; do surface API-shape decisions.
 
+## Packaging & CI (decided, implemented)
+
+- **Version**: `0.1.0` (bumped from the placeholder `0.1.0.dev0` in both
+  `pyproject.toml` and `swarmfs/__init__.py` — keep these two in sync on every
+  bump). `.devN`/pre-release suffixes are excluded from `pip install` by
+  default; `0.1.0` with the existing "Alpha" classifier is the intended shape
+  for a first real release — the classifier signals maturity, the version
+  string doesn't need to.
+- **CI**: `.github/workflows/tests.yml` runs the offline suite across Python
+  3.10–3.12 on push/PR (integration tests self-skip without
+  `SWARMFS_TEST_BEE`, so no live Bee node is needed in CI), plus a `package`
+  job that builds both artifacts, runs `twine check`, and asserts the sdist
+  contains `LICENSE` and never contains `.claude/` — a direct regression
+  guard for the packaging leak caught before the `0.1.0` release (see the
+  git history around the `LICENSE`/packaging-fixes commit).
+- **Publish**: `.github/workflows/publish.yml` triggers on a published GitHub
+  Release, re-runs tests, builds, and publishes via PyPI trusted publishing
+  (OIDC — no stored API token). **Requires a one-time manual step only the
+  repo owner can do**: register `petfold/swarmfs`, workflow `publish.yml`,
+  environment `pypi` as a (pending) trusted publisher at
+  https://pypi.org/manage/account/publishing/ before the first release is
+  cut — until then the `publish` job will fail at the OIDC exchange step.
+
 ## Phase plan
 
 See `docs/roadmap.md`. Short version:
