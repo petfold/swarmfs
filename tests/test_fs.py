@@ -202,3 +202,34 @@ def test_pandas_parquet_demo():
         storage_options={"client": FakeClient(store), "skip_instance_cache": True},
     )
     pd.testing.assert_frame_equal(out, df)
+
+
+def test_dask_partitioned_parquet_demo():
+    """v0 exit criterion (offline): dask reads a multi-file Parquet dataset,
+    which exercises directory `find` + per-partition range reads."""
+    pd = pytest.importorskip("pandas")
+    dd = pytest.importorskip("dask.dataframe")
+    pytest.importorskip("pyarrow")
+
+    from conftest import FakeClient, build_manifest
+
+    # three partitions, as a dask read_parquet on a directory would see them
+    parts = {}
+    frames = []
+    for i in range(3):
+        part = pd.DataFrame(
+            {"id": range(i * 100, (i + 1) * 100), "part": i}
+        )
+        frames.append(part)
+        buf = io.BytesIO()
+        part.to_parquet(buf)
+        parts[f"dataset/part.{i}.parquet"] = buf.getvalue()
+    expected = pd.concat(frames, ignore_index=True)
+
+    root, store = build_manifest(parts)
+    ddf = dd.read_parquet(
+        f"bzz://{root}/dataset",
+        storage_options={"client": FakeClient(store), "skip_instance_cache": True},
+    )
+    out = ddf.compute().sort_values("id").reset_index(drop=True)
+    pd.testing.assert_frame_equal(out[["id", "part"]], expected[["id", "part"]])

@@ -77,34 +77,44 @@ class SwarmClient:
             data = data[start or 0 : end]
         return data
 
+    @staticmethod
+    def _decode_span(span: bytes) -> int:
+        # bee encodes the erasure-coding redundancy level in the span's most
+        # significant byte (pkg/file/redundancy/span.go): span[7] > 128 means
+        # the top byte is `level | 0x80` and the real length is span[:7].
+        if span[7] > 128:
+            span = span[:7] + b"\x00"
+        return int.from_bytes(span, "little")
+
     async def bytes_size(self, ref: str) -> int | None:
         """Size of the data at ``ref`` without downloading it.
 
-        Tries HEAD /bytes first; falls back to reading the root chunk's
-        8-byte span via /chunks (the span of a root chunk is the total
-        content length). Returns None if neither works (e.g. a restrictive
-        gateway).
+        Reads the root chunk's 8-byte span via /chunks (the span of a root
+        chunk is the total content length). Falls back to HEAD /bytes — but
+        only as a fallback: Bee (≤2.8.x at least) puts the *raw* span,
+        redundancy bits included, in that Content-Length header, which can
+        come out negative and make HTTP clients reject the response outright.
+        Returns None if neither works (e.g. a restrictive gateway).
         """
         session = await self._get_session()
+        try:
+            async with session.get(f"{self.api_url}/chunks/{ref}") as resp:
+                if resp.status < 400:
+                    chunk = await resp.read()
+                    if len(chunk) >= 8:
+                        return self._decode_span(chunk[:8])
+        except (aiohttp.ClientError, OSError):
+            pass
         url = f"{self.api_url}/bytes/{ref}"
         try:
             async with session.head(url) as resp:
                 await self._raise_for_status(resp, url)
-                length = resp.headers.get("Content-Length")
-                if length is not None:
-                    return int(length)
+                length = int(resp.headers.get("Content-Length", -1))
+                if length >= 0:
+                    return length
         except FileNotFoundError:
             raise
-        except OSError:
-            pass
-        try:
-            async with session.get(f"{self.api_url}/chunks/{ref}") as resp:
-                if resp.status >= 400:
-                    return None
-                chunk = await resp.read()
-            if len(chunk) >= 8:
-                return int.from_bytes(chunk[:8], "little")
-        except OSError:
+        except (aiohttp.ClientError, OSError, ValueError):
             pass
         return None
 

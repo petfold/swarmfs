@@ -92,3 +92,46 @@ def test_read_existing_reference(fs, root_ref):
     data = fs.cat_file(files[0])
     if info["size"] is not None:
         assert len(data) == info["size"]
+
+
+@pytest.mark.skipif(not STAMP, reason="upload fixture needs SWARMFS_TEST_STAMP")
+def test_dask_partitioned_parquet_live(fs):
+    """The v0 exit criterion against a *real* node: upload a partitioned
+    Parquet dataset as a Swarm collection, read it back with dask."""
+    pd = pytest.importorskip("pandas")
+    dd = pytest.importorskip("dask.dataframe")
+    pytest.importorskip("pyarrow")
+
+    frames, tar_files = [], {}
+    for i in range(3):
+        part = pd.DataFrame({"id": range(i * 100, (i + 1) * 100), "part": i})
+        frames.append(part)
+        buf = io.BytesIO()
+        part.to_parquet(buf)
+        tar_files[f"dataset/part.{i}.parquet"] = buf.getvalue()
+    expected = pd.concat(frames, ignore_index=True)
+
+    tar = io.BytesIO()
+    with tarfile.open(fileobj=tar, mode="w") as t:
+        for name, content in tar_files.items():
+            ti = tarfile.TarInfo(name=name)
+            ti.size = len(content)
+            t.addfile(ti, io.BytesIO(content))
+    req = urllib.request.Request(
+        f"{BEE}/bzz",
+        data=tar.getvalue(),
+        headers={
+            "Content-Type": "application/x-tar",
+            "Swarm-Postage-Batch-Id": STAMP,
+            "Swarm-Collection": "true",
+        },
+        method="POST",
+    )
+    import json
+
+    with urllib.request.urlopen(req) as resp:
+        root = json.loads(resp.read())["reference"]
+
+    ddf = dd.read_parquet(f"bzz://{root}/dataset", storage_options={"api_url": BEE})
+    out = ddf.compute().sort_values("id").reset_index(drop=True)
+    pd.testing.assert_frame_equal(out[["id", "part"]], expected[["id", "part"]])

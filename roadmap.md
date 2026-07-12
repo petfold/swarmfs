@@ -17,22 +17,28 @@ Goal: `pd.read_parquet("bzz://<ref>/data.parquet")` and
       - [x] Recursive walk via `/bytes` fetches to enumerate entries under a prefix.
       - [x] Fixture-based unit tests (see Testing). Note: `build`+`save` (the in-memory
             half of the v1 write path) landed early — offline fixtures needed them.
-            Fixtures captured from a real Bee node still wanted as a cross-check.
+      - [x] Cross-check against a manifest captured from a **real Bee node** (2.8.1):
+            `tests/capture_fixture.py` records the raw nodes, `tests/test_real_fixture.py`
+            asserts our codec parses Bee's own bytes offline. Confirmed metadata shape
+            (`Content-Type` + `Filename` per file fork) and mid-edge dir splits.
 - [x] `SwarmFileSystem(AsyncFileSystem)`:
       - [x] `_ls`, `_info`, `_walk`, `_glob`, `_find` over the Mantaray walk.
       - [x] `_cat_file` / `_get_file` with range support.
       - [x] `SwarmFile` with `_fetch_range` for block caching / readahead.
       - [x] Capability-detection seam (`ListingBackend` interface in `swarmfs/_listing.py`,
             client-side impl only for now).
-- [ ] Read-only against a live node, and against a **public gateway** as an explicit
-      opt-in (`allow_gateway=True` or similar — never automatic; when no node is reachable,
-      fail with a message pointing at running a light node. See the gateways section in
-      `CLAUDE.md`). Integration tests exist in `tests/test_integration.py`, gated on
-      `SWARMFS_TEST_BEE`; not yet run against a live node.
-- [ ] Demos as tests: pandas single Parquet ✓; dask partitioned Parquet (exercises `find`)
-      — not yet; `simplecache::bzz://…` chaining ✓.
+- [x] Read-only against a live node — integration tests in `tests/test_integration.py`
+      (gated on `SWARMFS_TEST_BEE`/`SWARMFS_TEST_STAMP`) pass against a real Bee 2.8.1 node:
+      upload collection → find/ls/cat/range read round-trips.
+- [ ] **Public gateway** as an explicit opt-in (`allow_gateway=True` or similar — never
+      automatic; when no node is reachable, fail with a message pointing at running a light
+      node. See the gateways section in `CLAUDE.md`). Still to build.
+- [x] Demos as tests: pandas single Parquet ✓; dask partitioned Parquet (exercises `find`)
+      ✓ offline *and* against a live node; `simplecache::bzz://…` chaining ✓.
 
-Exit criterion: dask reads a multi-file Parquet dataset from Swarm end to end.
+Exit criterion: dask reads a multi-file Parquet dataset from Swarm end to end. **MET** —
+`test_dask_partitioned_parquet_live` uploads a 3-partition dataset to a real Bee node and
+reads it back through dask+swarmfs.
 
 ## v1 — Immutable writes + stamps
 
