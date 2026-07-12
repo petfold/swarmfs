@@ -46,8 +46,13 @@ bzz = "swarmfs:SwarmFileSystem"
 bzzf = "swarmfs:SwarmFeedFileSystem"
 
 [project.urls]
-Homepage = "https://github.com/solarpunk/swarmfs"
+Homepage = "https://github.com/petfold/swarmfs"
+Repository = "https://github.com/petfold/swarmfs"
+Issues = "https://github.com/petfold/swarmfs/issues"
 
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [".claude", ".pytest_cache", ".venv"]
