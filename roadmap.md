@@ -112,7 +112,10 @@ feed before consulting the listing cache.
 - [ ] Server-side mutation endpoint support (same seam, write side).
 - [ ] Encrypted references (128-hex) — decryption in the load path.
 - [ ] ACT-protected content (pass the `swarm-act-*` headers through).
-- [ ] Redundancy level as a write kwarg (erasure coding).
+- [x] Redundancy level as a write option (erasure coding): `redundancy=0..4` storage
+      option (default **2**; 0 disables, None = node default), passed as
+      `swarm-redundancy-level` on all commit uploads. Live-validated: the root chunk's
+      span carries the level and verified reads handle the parity refs.
 - [ ] Extract `swarmfs/mantaray/` as a standalone `mantaray-py` package.
 - [ ] Optional: contribute to / consume an S3-compatible gateway effort (separate project;
       shares the same node-side primitives).

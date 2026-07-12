@@ -181,6 +181,35 @@ def test_verified_reads_live(root_ref):
     assert vfs.verify_active is True and vfs.trusted is True
 
 
+@pytest.mark.skipif(not STAMP, reason="writes need SWARMFS_TEST_STAMP")
+def test_redundancy_write_live():
+    """redundancy= writes erasure-coded content: the root chunk's span
+    carries the level, and verified reads handle the parity refs."""
+    pytest.importorskip("eth_hash")
+    from swarmfs import SwarmFileSystem
+    from swarmfs.join import decode_span
+
+    content = bytes(range(256)) * 80  # 20480 bytes -> 5 data chunks
+    fs = SwarmFileSystem(api_url=BEE, stamp=STAMP, redundancy=2, skip_instance_cache=True)
+    fs.pipe_file("bzz://new/ec/data.bin", content)
+    root = fs.latest("new")
+
+    # the file's data reference points at a root chunk with level 2 encoded
+    info = fs.info(f"bzz://{root}/ec/data.bin")
+    assert info["size"] == len(content)
+    from fsspec.asyn import sync
+
+    chunk = sync(fs.loop, fs.client.chunk_get, info["reference"])
+    assert chunk[7] > 128, "span does not carry a redundancy level"
+    assert chunk[7] & 0x7F == 2, f"expected level 2, got {chunk[7] & 0x7F}"
+    assert decode_span(chunk[:8]) == len(content)
+
+    # verified read-back of our own erasure-coded write
+    vfs = SwarmFileSystem(api_url=BEE, verify=True, skip_instance_cache=True)
+    assert vfs.cat_file(f"bzz://{root}/ec/data.bin") == content
+    assert vfs.cat_file(f"bzz://{root}/ec/data.bin", start=5000, end=9000) == content[5000:9000]
+
+
 def _poll(fn, expect, timeout=90, interval=3):
     """Feed updates propagate through the network before they resolve
     (~6 s on a light node measured); poll until visible or timed out."""

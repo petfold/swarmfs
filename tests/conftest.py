@@ -78,6 +78,7 @@ class FakeClient:
         self.api_url = "fake://"
         self.stamps = [GOOD_STAMP] if stamps is None else stamps
         self.uploads: list[tuple[str, int]] = []  # (stamp, nbytes) per POST /bytes
+        self.redundancies: list[int | None] = []  # redundancy level per POST /bytes
 
     async def bytes_get(self, ref: str, start=None, end=None) -> bytes:
         data = self.store.get(bytes.fromhex(ref))
@@ -151,13 +152,14 @@ class FakeClient:
         self.uploads.append((stamp, len(data)))
         return addr.hex()
 
-    async def bytes_post(self, data, stamp: str, tag=None, pin=False) -> str:
+    async def bytes_post(self, data, stamp: str, tag=None, pin=False, redundancy=None) -> str:
         if not isinstance(data, bytes):
             data.seek(0)
             data = data.read()
         ref = hashlib.sha256(data).digest()
         self.store[ref] = data
         self.uploads.append((stamp, len(data)))
+        self.redundancies.append(redundancy)
         return ref.hex()
 
     async def stamps_list(self) -> list[dict]:

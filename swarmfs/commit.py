@@ -59,11 +59,13 @@ class CommitEngine:
         stamps: StampManager,
         concurrency: int = 8,
         pin: bool = False,
+        redundancy: int | None = None,
     ):
         self.client = client
         self.stamps = stamps
         self.concurrency = concurrency
         self.pin = pin
+        self.redundancy = redundancy
 
     async def commit(
         self,
@@ -85,7 +87,9 @@ class CommitEngine:
 
         async def upload(path: str, sw: StagedWrite) -> tuple[str, str]:
             async with sem:
-                ref = await self.client.bytes_post(sw.payload(), batch, pin=self.pin)
+                ref = await self.client.bytes_post(
+                    sw.payload(), batch, pin=self.pin, redundancy=self.redundancy
+                )
             return path, ref
 
         uploaded = dict(
@@ -106,7 +110,13 @@ class CommitEngine:
             await add(node, _b(path), bytes.fromhex(uploaded[path]), sw.metadata, load)
 
         async def saver(data: bytes) -> bytes:
-            return bytes.fromhex(await self.client.bytes_post(data, batch, pin=self.pin))
+            # manifest nodes are single chunks; parity applies to multi-chunk
+            # trees, but the header is harmless and keeps behavior uniform
+            return bytes.fromhex(
+                await self.client.bytes_post(
+                    data, batch, pin=self.pin, redundancy=self.redundancy
+                )
+            )
 
         new_root = await save(node, saver)
         for sw in writes.values():

@@ -154,8 +154,13 @@ class SwarmClient:
         stamp: str,
         tag: int | None = None,
         pin: bool = False,
+        redundancy: int | None = None,
     ) -> str:
-        """POST /bytes — upload a blob, returns its reference (hex)."""
+        """POST /bytes — upload a blob, returns its reference (hex).
+
+        ``redundancy`` is Bee's erasure-coding level (0–4): parity chunks are
+        added to multi-chunk trees so content survives missing chunks.
+        """
         url = f"{self.api_url}/bytes"
         headers = {
             "swarm-postage-batch-id": stamp,
@@ -165,6 +170,8 @@ class SwarmClient:
             headers["swarm-tag"] = str(tag)
         if pin:
             headers["swarm-pin"] = "true"
+        if redundancy is not None:
+            headers["swarm-redundancy-level"] = str(redundancy)
         session = await self._get_session()
         async with session.post(url, data=data, headers=headers) as resp:
             await self._raise_for_status(resp, url)

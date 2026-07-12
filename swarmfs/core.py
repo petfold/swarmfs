@@ -86,6 +86,10 @@ class SwarmFileSystem(AsyncFileSystem):
         pick the usable batch with the longest TTL at commit time.
     pin:
         Ask the node to pin uploaded content locally.
+    redundancy:
+        Erasure-coding level 0–4 for uploads (Bee's ``swarm-redundancy-level``):
+        parity chunks are added so content survives missing chunks. Defaults
+        to 2 ("strong"); pass 0 to disable, or None for the node's default.
     allow_gateway:
         Explicitly permit using an endpoint that is not your own node.
         Endpoints where the node-owner API (``/stamps``) is unreachable are
@@ -110,6 +114,7 @@ class SwarmFileSystem(AsyncFileSystem):
         headers: dict[str, str] | None = None,
         stamp: str | None = None,
         pin: bool = False,
+        redundancy: int | None = 2,
         allow_gateway: bool = False,
         verify: bool | None = None,
         client: SwarmClient | None = None,
@@ -127,13 +132,18 @@ class SwarmFileSystem(AsyncFileSystem):
         self.block_size = block_size or 2**20
         self.stamp = stamp
         self.pin = pin
+        if redundancy is not None and redundancy not in range(5):
+            raise ValueError(f"redundancy must be 0-4, got {redundancy!r}")
+        self.redundancy = redundancy
         self.allow_gateway = allow_gateway
         self.verify = verify
         self.verify_active: bool | None = None  # resolved by _setup
         self._reader = None  # client, or a VerifyingReader over it
         self._setup_done = False
         self._backend: ListingBackend | None = None
-        self._engine = CommitEngine(self.client, StampManager(self.client), pin=pin)
+        self._engine = CommitEngine(
+            self.client, StampManager(self.client), pin=pin, redundancy=redundancy
+        )
         # staging, keyed by the *origin* root of each manifest lineage
         self._staged: dict[str, dict[str, StagedWrite]] = {}
         self._staged_rm: dict[str, set[str]] = {}

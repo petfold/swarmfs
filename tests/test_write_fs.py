@@ -197,6 +197,28 @@ def test_overwrite_existing_file(wfs):
     ]
 
 
+def test_redundancy_level_passed_to_all_uploads(manifest):
+    root, store = manifest
+    # the default is level 2 ("strong")
+    fs = SwarmFileSystem(client=FakeClient(store), skip_instance_cache=True)
+    fs.pipe_file(f"bzz://{root}/r/levelled.bin", b"x" * 100)
+    # every commit upload — data blob and manifest nodes — carries the level
+    assert fs.client.redundancies and all(r == 2 for r in fs.client.redundancies)
+
+    off = SwarmFileSystem(client=FakeClient(store), redundancy=0, skip_instance_cache=True)
+    off.pipe_file(f"bzz://{root}/r/plain.bin", b"y")
+    assert off.client.redundancies and all(r == 0 for r in off.client.redundancies)
+
+    node_default = SwarmFileSystem(
+        client=FakeClient(store), redundancy=None, skip_instance_cache=True
+    )
+    node_default.pipe_file(f"bzz://{root}/r/default.bin", b"z")
+    assert all(r is None for r in node_default.client.redundancies)
+
+    with pytest.raises(ValueError, match="redundancy"):
+        SwarmFileSystem(client=FakeClient(store), redundancy=7, skip_instance_cache=True)
+
+
 def test_mkdir_is_noop(wfs):
     fs, root, client = wfs
     fs.mkdir(f"bzz://{root}/whatever")
