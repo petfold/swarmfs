@@ -25,6 +25,7 @@ here, that's a bug — please open an issue.
 - [DuckDB](#duckdb)
 - [Writing more than one file at a time](#writing-more-than-one-file-at-a-time)
 - [Getting a stable URL: feeds](#getting-a-stable-url-feeds)
+- [Also works with](#also-works-with)
 - [Troubleshooting](#troubleshooting)
 - [Where to go next](#where-to-go-next)
 
@@ -408,6 +409,39 @@ feed's owner is allowed to update it. See the
 [feeds section](README.md#mutable-feeds-bzzf) of the README for the full
 picture, including what "last-write-wins" means if two processes update the
 same feed concurrently.
+
+## Also works with
+
+Everything above got a full runnable example because they're the libraries
+most people in the target audience reach for first. But any library that
+consumes an fsspec filesystem (or a `path`/`filesystem` pair, or an fsspec
+URL) gets Swarm support the same way, with no swarmfs-specific code. Some
+other libraries worth knowing about:
+
+- **[Intake](https://intake.readthedocs.io/)** — data source cataloguing and
+  loading. A catalog entry pointing at a `bzz://` URL works the same as one
+  pointing at `s3://` or a local path.
+- **[DVC](https://dvc.org/)** — version control for machine learning
+  projects. DVC's fsspec-based remotes can target `bzz://`/`bzzf://` the
+  same way they target any other remote, giving DVC-tracked datasets a
+  content-addressed, verifiable backing store.
+- **[Kedro](https://kedro.org/)** — a framework for reproducible, modular
+  data science pipelines. Kedro's `DataCatalog` datasets accept an fsspec
+  `filepath`/`protocol`, so pipeline inputs and outputs can live on Swarm
+  without touching pipeline code.
+- **[pyxet](https://github.com/xetdata/pyxet)** — mounts and accesses very
+  large datasets from XetHub; another fsspec-filesystem consumer in the
+  same shape as the examples above.
+- **[Hugging Face 🤗 Datasets](https://huggingface.co/docs/datasets/)** —
+  loading and manipulating data for deep learning models. `load_dataset`
+  and friends accept fsspec URLs, so training data can be read straight off
+  Swarm.
+- **[petl](https://petl.readthedocs.io/)** — a general-purpose package for
+  extracting, transforming, and loading tables of data, also built on
+  fsspec for its file-based sources and sinks.
+
+(pandas, Zarr, xarray, and PyArrow are also fsspec-based — see their
+dedicated sections above.)
 
 ## Troubleshooting
 
