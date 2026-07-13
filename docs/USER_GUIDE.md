@@ -1,6 +1,6 @@
 # swarmfs user guide
 
-This is the long-form companion to the [README](README.md). The README is a
+This is the long-form companion to the [README](../README.md). The README is a
 quick reference; this guide walks through *why* things work the way they do
 and gives a runnable example for every major library in the Python data
 stack — pandas, Dask (DataFrame, Array, and Bag), Zarr, xarray, PyArrow, and
@@ -125,7 +125,7 @@ you close the file. The transaction matters once you're writing more than
 one file (see [Writing more than one file at a time](#writing-more-than-one-file-at-a-time));
 it's shown here so the pattern looks the same everywhere in this guide. For
 literally one file, `fs.upload("local.parquet")` (see the
-[README](README.md#upload-and-download-a-file)) is one line shorter and
+[README](../README.md#upload-and-download-a-file)) is one line shorter and
 skips the manifest machinery entirely.
 
 `stamp="auto"` tells swarmfs to pick whichever of your postage batches has
@@ -164,7 +164,7 @@ out = ddf.compute()
 The three files went up as one transaction (one commit, one new reference
 for the whole `sales/` directory). `dd.read_parquet` on a directory needs to
 list what's inside it — that's swarmfs walking Swarm's manifest trie behind
-the scenes (see [How it works](README.md#how-it-works) in the README), and
+the scenes (see [How it works](../README.md#how-it-works) in the README), and
 it's exactly the same mechanism `fs.find()` and `fs.ls()` use directly.
 
 ### dask.array (via Zarr)
@@ -378,7 +378,7 @@ Every example above that writes more than one file wraps the writes in
 
 If you only ever write one file (or one directory as a unit), you don't
 need a transaction — `fs.upload("local_file_or_dir")` is the one-line
-version, covered in the [README](README.md#upload-and-download-a-file).
+version, covered in the [README](../README.md#upload-and-download-a-file).
 
 Every commit, transactional or not, leaves the *previous* reference
 completely untouched — it's a new manifest, not an edit of the old one.
@@ -406,7 +406,7 @@ reference each time, but that reference gets published to a small piece of
 state (the "feed") that a stable `owner/topic` URL always resolves to the
 latest version of. Reading needs no key; writing does, because only the
 feed's owner is allowed to update it. See the
-[feeds section](README.md#mutable-feeds-bzzf) of the README for the full
+[feeds section](../README.md#mutable-feeds-bzzf) of the README for the full
 picture, including what "last-write-wins" means if two processes update the
 same feed concurrently.
 
@@ -471,7 +471,7 @@ boundary. Use threads, not processes, for parallelism against swarmfs.
 
 ## Where to go next
 
-- [README.md](README.md) — the quick reference: installation, the
+- [README.md](../README.md) — the quick reference: installation, the
   upload/download one-liners, the three API tiers (fsspec / `SwarmClient` /
   raw HTTP), and how the Mantaray manifest trie works under the hood.
 - [roadmap.md](roadmap.md) — what's implemented, what's planned, and the

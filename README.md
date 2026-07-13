@@ -9,10 +9,10 @@ URLs like `bzz://<reference>/path/to/file.parquet`.
 
 **Status: v2.** Read-only `bzz://` access, transactional copy-on-write
 writes (postage stamps, every commit a snapshot), and mutable feed-backed
-`bzzf://` mounts. See the [roadmap](roadmap.md).
+`bzzf://` mounts. See the [roadmap](docs/roadmap.md).
 
 New to swarmfs? This README is a quick reference — the
-**[User Guide](USER_GUIDE.md)** walks through a worked example for every
+**[User Guide](docs/USER_GUIDE.md)** walks through a worked example for every
 library above (pandas, all three Dask collection types, Zarr, xarray,
 PyArrow, DuckDB) and explains the content-addressing model in plain terms.
 
@@ -76,7 +76,7 @@ with fs.open("bzz://<reference>/big.parquet", block_size=2**20) as f:
 ```
 
 Same story for any other fsspec-based tool — Intake, DVC, Kedro, pyxet,
-Hugging Face Datasets, petl, and more (see the [User Guide](USER_GUIDE.md#also-works-with)).
+Hugging Face Datasets, petl, and more (see the [User Guide](docs/USER_GUIDE.md#also-works-with)).
 
 ## Transactional writes
 
