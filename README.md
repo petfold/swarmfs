@@ -75,6 +75,9 @@ with fs.open("bzz://<reference>/big.parquet", block_size=2**20) as f:
     f.read(8)
 ```
 
+Same story for any other fsspec-based tool — Intake, DVC, Kedro, pyxet,
+Hugging Face Datasets, petl, and more (see the [User Guide](USER_GUIDE.md#also-works-with)).
+
 ## Transactional writes
 
 For anything beyond a one-shot upload — building a dataset in place, changing
