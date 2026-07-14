@@ -46,8 +46,11 @@ we must traverse the Mantaray trie **client-side**, fetching nodes via `/bytes` 
 chunk. This is the single biggest piece of real engineering in the project.
 
 - A feature request for a server-side listing (+ mutation) endpoint has been filed upstream
-  (see `docs/bee-feature-request.md`), tracked as **ethersphere/bee#5535**
-  (https://github.com/ethersphere/bee/issues/5535). It is NOT on this project's critical path.
+  (full text in `docs/bee-feature-request.md`), tracked as **ethersphere/bee#5535**
+  (https://github.com/ethersphere/bee/issues/5535). Open, no maintainer reply when
+  filed; a read-only listing implementation is being prototyped on a bee fork (Go —
+  new `pkg/api` handler over the existing `WalkNode`/`LookupNode` primitives, scoped to
+  the read path with mutation as a follow-up). It is NOT on this project's critical path.
 - **This whole approach assumes CURRENT Bee features (client-side trie traversal).** It should
   be revised depending on the status of issue #5535: if/when the server-side manifest listing
   (and mutation) endpoint ships, the design becomes significantly more efficient — listing
