@@ -245,6 +245,33 @@ class SwarmClient:
             await self._raise_for_status(resp, url)
             return (await resp.json()).get("stamps") or []
 
+    async def stamp_get(self, batch_id: str) -> dict:
+        """GET /stamps/{id} — one batch's state (400/404s while a fresh
+        purchase's transaction is still confirming)."""
+        url = f"{self.api_url}/stamps/{batch_id}"
+        session = await self._get_session()
+        async with session.get(url) as resp:
+            await self._raise_for_status(resp, url)
+            return await resp.json()
+
+    async def stamp_buy(self, amount: int, depth: int) -> str:
+        """POST /stamps/{amount}/{depth} — buy a postage batch with the
+        node wallet's xBZZ. Returns the batch id as soon as the purchase
+        transaction is submitted (NOT yet usable — poll ``stamp_get``)."""
+        url = f"{self.api_url}/stamps/{amount}/{depth}"
+        session = await self._get_session()
+        async with session.post(url) as resp:
+            await self._raise_for_status(resp, url)
+            return (await resp.json())["batchID"]
+
+    async def chainstate(self) -> dict:
+        """GET /chainstate — currentPrice, minimumValidityBlocks, etc."""
+        url = f"{self.api_url}/chainstate"
+        session = await self._get_session()
+        async with session.get(url) as resp:
+            await self._raise_for_status(resp, url)
+            return await resp.json()
+
     async def tag_create(self) -> int:
         """POST /tags — a tag uid for tracking upload progress."""
         url = f"{self.api_url}/tags"
@@ -388,6 +415,9 @@ for _name in (
     "bytes_post",
     "bzz_post",
     "stamps_list",
+    "stamp_get",
+    "stamp_buy",
+    "chainstate",
     "tag_create",
     "tag_get",
     "feed_head",
