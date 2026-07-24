@@ -23,7 +23,6 @@ from typing import AsyncIterator
 from .bmt import CHUNK_PAYLOAD_SIZE, chunk_address
 
 REF_SIZE = 32
-BRANCHES = CHUNK_PAYLOAD_SIZE // REF_SIZE  # 128
 
 
 class VerificationError(OSError):
@@ -88,15 +87,28 @@ class VerifyingReader:
 
     async def _read(self, chunk: bytes, start: int, end: int, out: bytearray) -> None:
         """Append ``[start, end)`` of this subtree to ``out`` (both relative
-        to the subtree), fetching and verifying only the chunks needed."""
+        to the subtree), fetching and verifying only the chunks needed.
+
+        The per-child span ``unit`` is read from the FIRST child's own span
+        rather than computed as a power of 128: with erasure coding the
+        effective fanout is smaller (seen live: 107 data + 21 parity refs
+        per intermediate on a redundancy-uploaded file), and every child
+        but the last spans the same unit — a Bee tree invariant this walk
+        verifies. Found by swarmlite's JS port of this walker."""
         size = decode_span(chunk[:8])
         payload = chunk[8:]
         if size <= CHUNK_PAYLOAD_SIZE:
             out += payload[start:end]
             return
-        unit = CHUNK_PAYLOAD_SIZE
-        while unit * BRANCHES < size:
-            unit *= BRANCHES
+        if len(payload) < REF_SIZE:
+            raise VerificationError("intermediate chunk has no child references")
+        first = await self._chunk(payload[:REF_SIZE])
+        unit = decode_span(first[:8])
+        if not 0 < unit < size:
+            raise VerificationError(
+                f"first child spans {unit} of a {size}-byte subtree — not a "
+                "valid content tree"
+            )
         n_data = -(-size // unit)
         if len(payload) < n_data * REF_SIZE:
             raise VerificationError(
@@ -108,7 +120,9 @@ class VerifyingReader:
             if lo >= end:
                 break
             hi = min(lo + unit, size)
-            child = await self._chunk(payload[i * REF_SIZE : (i + 1) * REF_SIZE])
+            child = first if i == 0 else await self._chunk(
+                payload[i * REF_SIZE : (i + 1) * REF_SIZE]
+            )
             if decode_span(child[:8]) != hi - lo:
                 raise VerificationError(
                     f"child chunk span {decode_span(child[:8])} does not match "
@@ -128,13 +142,23 @@ class VerifyingReader:
         if size <= CHUNK_PAYLOAD_SIZE:
             yield payload[:size]
             return
-        unit = CHUNK_PAYLOAD_SIZE
-        while unit * BRANCHES < size:
-            unit *= BRANCHES
+        if len(payload) < REF_SIZE:
+            raise VerificationError("intermediate chunk has no child references")
+        # unit from the first child's own span (see _read): with erasure
+        # coding fewer than 128 of the refs are data, the rest parity
+        first = await self._chunk(payload[:REF_SIZE])
+        unit = decode_span(first[:8])
+        if not 0 < unit < size:
+            raise VerificationError(
+                f"first child spans {unit} of a {size}-byte subtree — not a "
+                "valid content tree"
+            )
         n_data = -(-size // unit)
         if len(payload) < n_data * REF_SIZE:
             raise VerificationError("intermediate chunk is missing child references")
         for i in range(n_data):
-            child = await self._chunk(payload[i * REF_SIZE : (i + 1) * REF_SIZE])
+            child = first if i == 0 else await self._chunk(
+                payload[i * REF_SIZE : (i + 1) * REF_SIZE]
+            )
             async for piece in self._iter_tree(child):
                 yield piece

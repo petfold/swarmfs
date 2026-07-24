@@ -198,3 +198,55 @@ def test_own_node_trusted_and_unverified_by_default(manifest):
     fs.ls(f"bzz://{root}")
     assert fs.trusted is True
     assert fs.verify_active is False
+
+
+def split_redundant(data: bytes, store: dict, fanout: int = 107, parity: int = 21) -> bytes:
+    """Split like an erasure-coded upload: intermediates carry `fanout`
+    data references followed by `parity` parity references. The parity
+    refs here are garbage that is NOT in the store — a correct walker
+    must never dereference them."""
+    from swarmfs.bmt import chunk_address
+
+    def put(chunk: bytes) -> bytes:
+        ref = chunk_address(chunk)
+        store[ref] = chunk
+        return ref
+
+    level: list[tuple[bytes, int]] = []
+    for i in range(0, len(data), 4096):
+        part = data[i : i + 4096]
+        level.append((put(len(part).to_bytes(8, "little") + part), len(part)))
+    while len(level) > 1:
+        nxt = []
+        for i in range(0, len(level), fanout):
+            group = level[i : i + fanout]
+            if len(group) == 1:
+                nxt.append(group[0])
+                continue
+            span = sum(s for _, s in group)
+            refs = b"".join(r for r, _ in group) + b"\xee" * 32 * parity
+            nxt.append((put(span.to_bytes(8, "little") + refs), span))
+        level = nxt
+    return level[0][0]
+
+
+def test_erasure_coded_tree_shapes():
+    """Redundancy-uploaded files pack FEWER than 128 data refs per
+    intermediate (seen live on Bee 2.8.1: 107 data + 21 parity), so the
+    per-child unit cannot be derived as a power of 128 — it must be read
+    from the first child's own span. Found by swarmlite's JS port."""
+    size = 130 * 4096 + 500  # two intermediates at fanout 107 + a root
+    data = payload(size, seed=7)
+    store: dict = {}
+    root = split_redundant(data, store).hex()
+    reader = VerifyingReader(FakeClient(store))
+
+    assert run(reader.bytes_size(root)) == size
+    assert run(reader.bytes_get(root)) == data                      # full read
+    assert run(reader.bytes_get(root, 438_000, 439_000)) == data[438_000:439_000]
+    assert run(reader.bytes_get(root, size - 10, size)) == data[-10:]
+
+    async def collect():
+        return b"".join([piece async for piece in reader.bytes_iter(root)])
+
+    assert run(collect()) == data                                   # streaming too
