@@ -16,6 +16,12 @@ New to swarmfs? This README is a quick reference — the
 library above (pandas, all three Dask collection types, Zarr, xarray,
 PyArrow, DuckDB) and explains the content-addressing model in plain terms.
 
+## Install
+
+```bash
+pip install swarmfs            # or: pip install "swarmfs[feeds]" for signed feeds
+```
+
 ## Upload and download a file
 
 You need a running [Bee light node](https://docs.ethswarm.org/docs/bee/installation/getting-started/)
