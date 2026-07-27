@@ -102,6 +102,22 @@ The live run also flushed out a staleness bug: fsspec's dircache made `ls` skip 
 re-resolution entirely, so listings never honored `feed_ttl`; bzzf now refreshes the
 feed before consulting the listing cache.
 
+## Local addressing (2026-07-28)
+
+- [x] **Splitter** (`swarmfs/splitter.py`): `split(data) -> (root, chunks)` and
+      `content_address(data)` build the Swarm chunk tree and its BMT addresses
+      offline — the inverse of the verifying joiner, which previously only
+      existed as a test helper. Verified against a live Bee 2.8.1 at every tree
+      shape: with erasure coding off, the local reference equals what
+      `POST /bytes` returns, exactly.
+      *Finding pinned by that test:* nodes (and swarmfs itself, `redundancy=2`)
+      commonly default to erasure coding, whose roots differ because parity
+      chunks change every intermediate — Bee marks them by setting the span's
+      top byte to `0x80 | level`. The test asserts both directions so nobody
+      later "fixes" the splitter to chase a default it cannot reproduce.
+      This is also the erasure-coding shape that broke `join.py`'s 128-fanout
+      assumption (fixed the same week).
+
 ## Later / opportunistic
 
 - [ ] Server-side listing endpoint support: when the upstream endpoint (ethersphere/bee#5535,

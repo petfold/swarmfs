@@ -410,6 +410,47 @@ feed's owner is allowed to update it. See the
 picture, including what "last-write-wins" means if two processes update the
 same feed concurrently.
 
+## Knowing a reference before you upload
+
+Swarm addresses are computable: the reference *is* a hash of the content's
+chunk tree, so you can work it out locally with no node, no stamp and no
+network.
+
+```python
+import swarmfs
+
+data = open("report.parquet", "rb").read()
+ref = swarmfs.content_address(data)          # what Bee would return
+root, chunks = swarmfs.split(data)           # every chunk, keyed by address
+```
+
+Uses for it:
+
+- **Check before paying.** Ask a gateway for `ref` and skip the upload (and the
+  stamp) if the network already has that content.
+- **Name local blobs by their Swarm address**, so an offline directory and a
+  published store share one address space — recordstore's `DirBytesStore`
+  offers exactly this as `addressing="swarm"`.
+- **Build fixtures at real addresses**, which is what lets verification code be
+  tested without a node.
+
+Needs the `feeds` extra (it uses keccak256): `pip install "swarmfs[feeds]"`.
+
+**The caveat, and it is easy to trip over.** The computed reference is for a
+*plain* upload. Erasure coding adds parity chunks, which change every
+intermediate node and therefore the root — and only the node can generate
+parity, so a redundant upload's reference is not predictable offline. swarmfs
+writes with `redundancy=2` by default, and Bee nodes often default to
+redundancy too, so:
+
+```python
+fs = fsspec.filesystem("bzz", stamp="auto", redundancy=0)   # match local refs
+```
+
+A root produced with redundancy is recognisable: Bee sets the top byte of the
+chunk's span to `0x80 | level` (which is why the reader masks it off when
+decoding lengths).
+
 ## Also works with
 
 Everything above got a full runnable example because they're the libraries

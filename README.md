@@ -110,6 +110,44 @@ ffs.pipe_file(f"bzzf://{owner}/my-app/config.json", b'{"v": 2}')
 # readers need no keys — and the URL never changes
 ```
 
+## Addressing content offline, and buying stamps
+
+Two things you can do without uploading anything:
+
+```python
+import swarmfs
+
+ref = swarmfs.content_address(open("photo.jpg", "rb").read())   # no node needed
+root, chunks = swarmfs.split(data)   # the whole chunk tree, keyed by address
+```
+
+`content_address` computes the reference Bee would return for those bytes, so
+you can check whether the network already has content, name blobs by their
+Swarm address in a local store, or build test fixtures at real addresses. It
+needs the `feeds` extra (keccak256).
+
+**One caveat that bites in practice:** this is the reference for a *plain*
+upload. Erasure coding changes every intermediate chunk and therefore the root,
+and parity is the node's to generate — so a redundant upload's reference cannot
+be predicted offline. swarmfs writes with `redundancy=2` by default and many
+nodes default to redundancy too, so pass `redundancy=0` if you want the
+uploaded reference to match the one you computed.
+
+Stamps can also be handled programmatically — selection is automatic
+(`stamp="auto"` picks the usable batch with the longest life), and purchase is
+available but never implicit:
+
+```python
+from swarmfs.stamps import StampManager
+
+plan = await mgr.plan(size_bytes, ttl_secs)   # depth, amount, cost in xBZZ
+batch = await mgr.buy(plan.amount, plan.depth)  # spends the node wallet's xBZZ
+```
+
+`plan` sizes the batch for your upload (bucket-overflow-aware) and prices it
+from the chain; `buy` purchases and waits until the batch is usable. Nothing in
+swarmfs buys on its own — deciding to spend is the caller's.
+
 ## Which API should I use?
 
 Three tiers, all backed by the same endpoint resolution
