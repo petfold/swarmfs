@@ -344,3 +344,54 @@ def test_dask_partitioned_parquet_live(fs):
     ddf = dd.read_parquet(f"bzz://{root}/dataset", storage_options={"api_url": BEE})
     out = ddf.compute().sort_values("id").reset_index(drop=True)
     pd.testing.assert_frame_equal(out[["id", "part"]], expected[["id", "part"]])
+
+
+@pytest.mark.skipif(not STAMP, reason="uploading needs SWARMFS_TEST_STAMP")
+def test_local_split_matches_bee():
+    """The splitter's claim, checked against the only authority that matters:
+    the reference Bee computes for the same bytes.
+
+    `POST /bytes` returns the *content* reference (no manifest wrapping), so
+    this compares directly with `split()`'s root. Two things are pinned:
+
+    1. With erasure coding off, the local reference equals Bee's — exactly,
+       at every tree shape. That is what makes "address before you upload"
+       and Swarm-addressed local stores valid.
+    2. With redundancy on, multi-chunk roots *differ*, and legitimately so:
+       parity chunks are the node's to generate and they change every
+       intermediate. Pinning this stops someone "fixing" the splitter to
+       chase a node default it cannot reproduce. Bee marks such a root by
+       setting the span's top byte to 0x80 | level.
+    """
+    import asyncio
+    import random
+
+    from swarmfs._client import SwarmClient
+    from swarmfs.splitter import content_address
+
+    async def main():
+        client = SwarmClient(BEE)
+        try:
+            redundant_differed = False
+            for size in (0, 1, 4095, 4096, 4097, 8192, 100_000, 600_000):
+                data = random.Random(size).randbytes(size)
+                local = content_address(data).hex()
+
+                plain = await client.bytes_post(data, STAMP, redundancy=0)
+                assert local == plain, (
+                    f"size {size}: local {local[:16]}… != bee {plain[:16]}…")
+
+                default = await client.bytes_post(data, STAMP)
+                if default != local:
+                    redundant_differed = True
+                    chunk = await client.chunk_get(default)
+                    assert chunk[7] > 128, (
+                        "a root that differs from the plain split should be "
+                        f"erasure-coded, but span is {chunk[:8].hex()}")
+            assert redundant_differed, (
+                "this node did not add redundancy by default, so claim 2 went "
+                "unexercised — not a failure of the splitter")
+        finally:
+            await client.close()
+
+    asyncio.run(main())
