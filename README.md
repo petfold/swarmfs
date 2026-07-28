@@ -1,5 +1,9 @@
 # swarmfs
 
+[![tests](https://github.com/petfold/swarmfs/actions/workflows/tests.yml/badge.svg)](https://github.com/petfold/swarmfs/actions/workflows/tests.yml)
+[![PyPI](https://img.shields.io/pypi/v/swarmfs)](https://pypi.org/project/swarmfs/)
+[![license](https://img.shields.io/badge/license-BSD--3--Clause-blue)](LICENSE)
+
 An [fsspec](https://filesystem-spec.readthedocs.io/) backend for
 [Ethereum Swarm](https://docs.ethswarm.org/), talking to a
 [Bee](https://github.com/ethersphere/bee) node (or public gateway) over its
