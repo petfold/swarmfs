@@ -195,6 +195,15 @@ feed before consulting the listing cache.
       `swarm-redundancy-level` on all commit uploads. Live-validated: the root chunk's
       span carries the level and verified reads handle the parity refs.
 - [ ] Extract `swarmfs/mantaray/` as a standalone `mantaray-py` package.
+- [ ] **Extract postage management** — the pure half of `stamps.py` (51% of it, measured:
+      erasure tables, sizing, arithmetic, parsers, plan builders, recovery messages) as a
+      zero-dependency module, leaving each library its own transport. Boundary, layout and
+      migration in `docs/postage-extraction.md`; blocked on
+      [ethswarm-tools/bee-py#3](https://github.com/ethswarm-tools/bee-py/issues/3), where
+      the same logic was offered to the Python Bee client that already exists (two of
+      Peter's projects already depend on it). Trigger: no reply / not maintained, **and** a
+      second consumer that wants stamps without a filesystem. Motivating smell: recordstore
+      imports `swarmfs._client` — a private module — just to reach `StampManager`.
 - [ ] Optional: contribute to / consume an S3-compatible gateway effort (separate project;
       shares the same node-side primitives).
 
