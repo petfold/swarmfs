@@ -102,6 +102,39 @@ The live run also flushed out a staleness bug: fsspec's dircache made `ls` skip 
 re-resolution entirely, so listings never honored `feed_ttl`; bzzf now refreshes the
 feed before consulting the listing cache.
 
+## Stamp lifecycle: renewal (2026-07-29)
+
+- [x] **The batch lifecycle after purchase**, driven by a real need: a published demo's
+      batch had 24 days left and no way to extend it except raw `curl`. Client tier
+      (`_client.py`) gained the three missing endpoints — `stamp_topup`, `stamp_dilute`,
+      `wallet` (sync twins auto-generated, enforced by `test_facade_mirrors_async_surface`).
+      Policy tier (`stamps.py`) gained pure arithmetic (`ttl_to_amount`, `amount_to_ttl`,
+      `batch_cost_bzz`), inspection (`list_batches`, `get_batch`, `balance_bzz`), and
+      plan/apply pairs: `plan_topup` (extend BY `ttl_secs`, TO `total_ttl_secs`, or for at
+      most `budget_bzz`) + `topup`, `plan_dilute` + `dilute`. Same doctrine as `buy`:
+      plans are pure questions, only the verbs spend, and every post-transaction failure
+      path names the batch *and* the tx.
+      *Findings pinned by tests (all measured live against Bee 2.8.1):*
+      1. **A topup is additive** — the applied `amount` delta equals exactly what was
+         paid; it does not restart the clock. Verified twice (+1 xBZZ → +16.08 d, and
+         +6 h → +0.25 d on the same batch).
+      2. **`amount` is cumulative from `blockNumber`**, not remaining balance — so
+         `amount / currentPrice * 5` is *total* lifetime and the elapsed part is spent.
+         Discovered by an integration assertion failing by exactly the batch's age
+         (27.78 d implied vs 24.0 d reported, 3.79 d old). Remaining life is `batchTTL`.
+      3. **The node indexes a topup ~40 s after the tx returns** (41.8 s measured), so an
+         immediate read shows the old amount while the wallet is already debited —
+         indistinguishable from a silent failure. Hence `_await_applied` polls.
+      4. **The price moves**: 68657 → 68699 within one day, so a quoted TTL is an
+         estimate. Monitoring `batchTTL` beats trusting a purchase-time calculation.
+      5. **Dilution is paid for in TTL** (~halved per depth step) and only ever raises
+         depth, so on a nearly-full immutable batch it must precede a topup —
+         `plan_topup().warning` says so rather than leaving it to documentation.
+      Live spending stays opt-in: `SWARMFS_TEST_SPEND=<xBZZ>` gates the one test that
+      really tops up; the inspection/planning integration test spends nothing and runs
+      on `SWARMFS_TEST_BEE` alone. Renewal *policy* (a CLI, expiry warnings, mapping
+      batches to publications) belongs to callers — swarmfs has no CLI by decision.
+
 ## Local addressing (2026-07-28)
 
 - [x] **Splitter** (`swarmfs/splitter.py`): `split(data) -> (root, chunks)` and

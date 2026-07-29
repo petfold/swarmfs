@@ -37,7 +37,8 @@ pandas/dask/zarr experience matter most. Swarm-native mutable-filesystem use
    the mutable filesystem; `bzz://` is immutable.
 3. **Payment.** Writing costs money and needs a valid postage stamp (batch). Stamps live in
    `storage_options`. A stamp manager checks usability/TTL *before* a commit and fails early
-   with a useful error, never a mid-write 402.
+   with a useful error, never a mid-write 402. Payment is also *ongoing*: a batch expires,
+   and its content dies with it — see "Stamp lifecycle" below.
 
 ## The listing problem (CRITICAL architectural point)
 
@@ -148,6 +149,51 @@ chunk. This is the single biggest piece of real engineering in the project.
   for "no usable stamp" whether caught locally by StampManager or as a node
   402. 404 stays builtin `FileNotFoundError` (fsspec semantics depend on it).
   `StampError` now lives in exceptions.py, re-exported from `swarmfs.stamps`.
+
+## Stamp lifecycle: renewal (decided, implemented 2026-07-29)
+
+Purchase was never the whole story — a batch expires and takes its content with
+it. The lifecycle now lives in the same two tiers as everything else: raw
+endpoints in `_client.py` (`stamp_topup`, `stamp_dilute`, `wallet`; sync twins
+generated, lockstep enforced by `test_facade_mirrors_async_surface`), policy in
+`stamps.py`. No Bee change was needed — unlike the listing gap, both PATCH
+endpoints already exist.
+
+- **Plan/apply pairs, mirroring `plan`/`buy`.** `plan_topup` (extend BY
+  `ttl_secs`, TO `total_ttl_secs`, or for at most `budget_bzz` — the three
+  questions publishers actually ask) + `topup`; `plan_dilute` + `dilute`. Plans
+  are pure questions that spend nothing; only the verbs move money. Doctrine
+  unchanged: swarmfs never spends implicitly, and after a transaction every
+  failure path names the batch **and** the tx, or a paid-for operation becomes
+  unverifiable. `topup` also refuses up front when the wallet can't cover the
+  cost — the same fail-early stance as validating a stamp before an upload.
+- **Facts learned live** (Bee 2.8.1, pinned by tests — the numbers are in
+  `tests/test_stamps.py`, so don't "simplify" the arithmetic away):
+  - A topup is **additive**: the applied `amount` delta equals exactly what was
+    paid. Verified twice on one batch (+1 xBZZ → +16.08 d; +6 h → +0.25 d).
+  - **`amount` is cumulative from `blockNumber`**, not remaining balance:
+    `amount / currentPrice * 5` is *total* lifetime, elapsed part included.
+    Found when an integration assertion failed by exactly the batch's age
+    (27.78 d implied vs 24.0 d reported, batch 3.79 d old). Remaining life is
+    always the node's `batchTTL`.
+  - The node **indexes a topup ~40 s after the tx returns** (41.8 s measured),
+    so an immediate read shows the old amount while the wallet is already
+    debited — indistinguishable from a silent failure. `_await_applied` polls.
+  - **The price drifts** (68657 → 68699 in a day), so any quoted TTL is an
+    estimate; monitor `batchTTL` rather than trusting purchase-time maths.
+  - **Dilution is paid for in TTL** (~halved per depth step) and only raises
+    depth, so on a nearly-full *immutable* batch it must precede a topup.
+    `plan_topup().warning` encodes that ordering instead of documenting it.
+  - **An expired batch cannot be revived**: the node drops it, and a topup
+    against it fails. Renewal is prevention, not repair.
+- **Live tests are opt-in by cost**: the inspection/planning integration test
+  spends nothing (runs on `SWARMFS_TEST_BEE` alone); the one test that really
+  tops up is gated on `SWARMFS_TEST_SPEND=<xBZZ budget>` — an explicit amount
+  doubling as consent.
+- **Scope boundary holds**: monitoring/CLI/expiry policy and the
+  batch↔publication mapping belong to callers (swarmlite), not here. swarmfs
+  offers `list_batches()` + `StampInfo.problem(min_ttl)` as the primitive and
+  stops there — there is still no swarmfs CLI, by decision.
 
 ## `modified()` (decided, implemented)
 
@@ -260,12 +306,13 @@ gateway selection/fallback (see next section).
 
 ## Packaging & CI (decided, implemented)
 
-- **Version**: `0.1.0` (bumped from the placeholder `0.1.0.dev0` in both
-  `pyproject.toml` and `swarmfs/__init__.py` — keep these two in sync on every
-  bump). `.devN`/pre-release suffixes are excluded from `pip install` by
-  default; `0.1.0` with the existing "Alpha" classifier is the intended shape
-  for a first real release — the classifier signals maturity, the version
-  string doesn't need to.
+- **Version**: `0.3.0` (the stamp-lifecycle release; `0.2.0` was local
+  addressing, `0.1.0` the first real one, bumped from the placeholder
+  `0.1.0.dev0`). Live in both `pyproject.toml` and `swarmfs/__init__.py` —
+  keep these two in sync on every bump. `.devN`/pre-release suffixes are
+  excluded from `pip install` by default; a plain version with the "Alpha"
+  classifier is the intended shape — the classifier signals maturity, the
+  version string doesn't need to.
 - **CI**: `.github/workflows/tests.yml` runs the offline suite across Python
   3.11–3.12 on push/PR (integration tests self-skip without
   `SWARMFS_TEST_BEE`, so no live Bee node is needed in CI), plus a `package`
@@ -273,13 +320,14 @@ gateway selection/fallback (see next section).
   contains `LICENSE` and never contains `.claude/` — a direct regression
   guard for the packaging leak caught before the `0.1.0` release (see the
   git history around the `LICENSE`/packaging-fixes commit).
-- **Publish**: `.github/workflows/publish.yml` triggers on a published GitHub
-  Release, re-runs tests, builds, and publishes via PyPI trusted publishing
-  (OIDC — no stored API token). **Requires a one-time manual step only the
-  repo owner can do**: register `petfold/swarmfs`, workflow `publish.yml`,
-  environment `pypi` as a (pending) trusted publisher at
-  https://pypi.org/manage/account/publishing/ before the first release is
-  cut — until then the `publish` job will fail at the OIDC exchange step.
+- **Publish**: `.github/workflows/publish.yml` triggers on pushing a `v*` tag
+  (uniform across the stack; it no longer waits for a GitHub Release), re-runs
+  tests, builds, and publishes via PyPI trusted publishing (OIDC — no stored
+  API token) from the `pypi` environment. So a release is: bump both version
+  strings → commit → `git tag vX.Y.Z && git push origin vX.Y.Z`. The one-time
+  manual step (register `petfold/swarmfs`, workflow `publish.yml`, environment
+  `pypi` at https://pypi.org/manage/account/publishing/) is **done** — 0.1.0
+  and 0.2.0 published through it.
 
 ## Phase plan
 

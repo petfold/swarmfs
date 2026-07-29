@@ -395,3 +395,110 @@ def test_local_split_matches_bee():
             await client.close()
 
     asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# stamp renewal against a live node
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not STAMP, reason="needs SWARMFS_TEST_STAMP to inspect")
+def test_stamp_inspection_and_planning_live():
+    """Read-only: parse a real batch and price extensions against the real
+    chainstate. Spends nothing — every ``plan_*`` is a pure question.
+    """
+    import asyncio
+
+    from swarmfs._client import SwarmClient
+    from swarmfs.stamps import StampManager, amount_to_ttl, batch_cost_bzz
+
+    async def main():
+        client = SwarmClient(BEE)
+        try:
+            mgr = StampManager(client)
+
+            batches = await mgr.list_batches()
+            assert any(b.batch_id.lower() == STAMP.lower() for b in batches)
+
+            info = await mgr.get_batch(STAMP)
+            assert info.depth >= info.bucket_depth
+            assert info.amount > 0
+            assert info.bucket_capacity == 2 ** (info.depth - info.bucket_depth)
+
+            balance = await mgr.balance_bzz()
+            assert balance >= 0
+
+            # a week's extension, priced three ways that must agree
+            week = 7 * 86400
+            by_week = await mgr.plan_topup(STAMP, ttl_secs=week)
+            assert by_week.added_ttl_secs == pytest.approx(week, rel=1e-3)
+            assert by_week.cost_bzz == pytest.approx(
+                batch_cost_bzz(by_week.added_amount, info.depth), rel=1e-9)
+
+            to_total = await mgr.plan_topup(STAMP, total_ttl_secs=max(info.ttl, 0) + week)
+            assert to_total.added_ttl_secs == pytest.approx(week, rel=1e-3)
+
+            spend = await mgr.plan_topup(STAMP, budget_bzz=by_week.cost_bzz)
+            assert spend.added_ttl_secs == pytest.approx(week, rel=1e-2)
+
+            # topping up ADDS: the plan's total is remaining + purchased
+            assert by_week.total_ttl_secs == max(info.ttl, 0) + by_week.added_ttl_secs
+
+            # a batch's `amount` is CUMULATIVE from its creation block, so it
+            # implies total lifetime, not remaining life (this assertion is
+            # how that was discovered — it failed by exactly the batch's age)
+            chain = await client.chainstate()
+            price = int(chain["currentPrice"])
+            age_secs = (int(chain["block"]) - info.block_number) * 5
+            assert amount_to_ttl(info.amount, price) == pytest.approx(
+                max(info.ttl, 0) + age_secs, rel=0.02), (
+                "amount/price*5 should equal remaining TTL plus the batch's "
+                "age; a large gap means the price moved since purchase")
+
+            # dilution is priced in TTL, and only ever upward
+            dil = await mgr.plan_dilute(STAMP, info.depth + 1)
+            assert dil.ttl_after_secs == pytest.approx(max(info.ttl, 0) / 2, rel=1e-3)
+            with pytest.raises(Exception, match="only increases depth"):
+                await mgr.plan_dilute(STAMP, info.depth)
+        finally:
+            await client.close()
+
+    asyncio.run(main())
+
+
+@pytest.mark.skipif(
+    not (STAMP and os.environ.get("SWARMFS_TEST_SPEND")),
+    reason="set SWARMFS_TEST_SPEND=<xBZZ budget, e.g. 0.01> to really top up "
+           "a batch — this SPENDS the node wallet's xBZZ and is irreversible",
+)
+def test_topup_extends_a_real_batch_live():
+    """The one test that spends money: top up ``SWARMFS_TEST_STAMP`` by
+    ``SWARMFS_TEST_SPEND`` xBZZ and assert the batch gained exactly the
+    purchased amount (the additive property) once the node indexes it.
+    """
+    import asyncio
+
+    from swarmfs._client import SwarmClient
+    from swarmfs.stamps import StampManager
+
+    budget = float(os.environ["SWARMFS_TEST_SPEND"])
+
+    async def main():
+        client = SwarmClient(BEE)
+        try:
+            mgr = StampManager(client)
+            before = await mgr.get_batch(STAMP)
+            plan = await mgr.plan_topup(STAMP, budget_bzz=budget)
+            assert plan.cost_bzz <= budget * 1.001
+            if plan.cost_bzz > await mgr.balance_bzz():
+                pytest.skip(f"wallet cannot cover {plan.cost_bzz:.4f} xBZZ")
+
+            after = await mgr.topup(STAMP, plan.added_amount)
+            assert after.amount - before.amount == plan.added_amount, (
+                "a topup must ADD to the batch's balance, not replace it")
+            assert after.ttl > before.ttl - 60  # drained a little meanwhile
+            assert after.depth == before.depth  # topup never changes capacity
+        finally:
+            await client.close()
+
+    asyncio.run(main())

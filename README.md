@@ -138,15 +138,37 @@ nodes default to redundancy too, so pass `redundancy=0` if you want the
 uploaded reference to match the one you computed.
 
 Stamps can also be handled programmatically — selection is automatic
-(`stamp="auto"` picks the usable batch with the longest life), and purchase is
-available but never implicit:
+(`stamp="auto"` picks the usable batch with the longest life), and spending is
+available but never implicit. Every `plan_*` call is a pure question; only the
+verbs move money:
 
 ```python
 from swarmfs.stamps import StampManager
 
 plan = await mgr.plan(size_bytes, ttl_secs)   # depth, amount, cost in xBZZ
 batch = await mgr.buy(plan.amount, plan.depth)  # spends the node wallet's xBZZ
+
+# renewal: extend BY a duration, TO a total, or for at most a budget
+plan = await mgr.plan_topup(batch, ttl_secs=30 * 86400)
+print(plan.cost_bzz, plan.total_ttl_secs, plan.warning)
+info = await mgr.topup(batch, plan.added_amount)   # waits until the node applies it
+
+# capacity, not time: dilution costs gas, and is paid for in TTL
+print((await mgr.plan_dilute(batch, 20)).ttl_after_secs)   # ~halved per step
 ```
+
+Four things about renewal that are easy to get wrong, so swarmfs encodes them:
+a topup **adds** to the remaining life rather than restarting it; a nearly-full
+**immutable** batch should be diluted *before* topping up, or the dilution
+halves away part of what you just bought (`plan_topup().warning` says so); a
+batch's `amount` is *cumulative since creation*, so remaining life is the
+node's `batchTTL`, never `amount / currentPrice`; and an expired batch cannot
+be revived, so renew while it lives. The node also takes ~40 s to index a
+topup — `topup()` polls, because reading straight after the transaction shows
+the old value and looks like a silent failure.
+
+For monitoring, `mgr.list_batches()` plus `StampInfo.problem(min_ttl)` turns
+"still usable" into "needs renewing" at whatever threshold you choose.
 
 `plan` sizes the batch for your upload (bucket-overflow-aware) and prices it
 from the chain; `buy` purchases and waits until the batch is usable. Nothing in

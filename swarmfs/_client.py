@@ -264,9 +264,43 @@ class SwarmClient:
             await self._raise_for_status(resp, url)
             return (await resp.json())["batchID"]
 
+    async def stamp_topup(self, batch_id: str, added_amount: int) -> str:
+        """PATCH /stamps/topup/{id}/{amount} — extend a batch's life with
+        the node wallet's xBZZ. ``added_amount`` is per chunk and ADDS to
+        the batch's remaining balance (it does not restart it). Returns the
+        transaction hash as soon as the tx is submitted; the batch's own
+        ``amount`` only changes once the node indexes the chain event, so
+        poll ``stamp_get`` rather than trusting an immediate read."""
+        url = f"{self.api_url}/stamps/topup/{batch_id}/{added_amount}"
+        session = await self._get_session()
+        async with session.patch(url) as resp:
+            await self._raise_for_status(resp, url)
+            return (await resp.json()).get("txHash", "")
+
+    async def stamp_dilute(self, batch_id: str, depth: int) -> str:
+        """PATCH /stamps/dilute/{id}/{depth} — raise a batch's depth so it
+        holds more chunks. Costs gas only, but the same balance now covers
+        twice the chunks per depth step, so the remaining TTL is roughly
+        halved each step. Returns the transaction hash; poll ``stamp_get``
+        for the new depth."""
+        url = f"{self.api_url}/stamps/dilute/{batch_id}/{depth}"
+        session = await self._get_session()
+        async with session.patch(url) as resp:
+            await self._raise_for_status(resp, url)
+            return (await resp.json()).get("txHash", "")
+
     async def chainstate(self) -> dict:
         """GET /chainstate — currentPrice, minimumValidityBlocks, etc."""
         url = f"{self.api_url}/chainstate"
+        session = await self._get_session()
+        async with session.get(url) as resp:
+            await self._raise_for_status(resp, url)
+            return await resp.json()
+
+    async def wallet(self) -> dict:
+        """GET /wallet — the node wallet's xBZZ (``bzzBalance``, in plur)
+        and xDAI (``nativeTokenBalance``, for gas)."""
+        url = f"{self.api_url}/wallet"
         session = await self._get_session()
         async with session.get(url) as resp:
             await self._raise_for_status(resp, url)
@@ -417,7 +451,10 @@ for _name in (
     "stamps_list",
     "stamp_get",
     "stamp_buy",
+    "stamp_topup",
+    "stamp_dilute",
     "chainstate",
+    "wallet",
     "tag_create",
     "tag_get",
     "feed_head",

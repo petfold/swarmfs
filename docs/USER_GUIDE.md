@@ -491,6 +491,24 @@ stamp. Buy one (`swarm-cli stamp buy --depth 20 --amount 100000000`) or
 check `fs.info()`-style tools against `GET /stamps` on your node to see why
 an existing one isn't usable (expired, still syncing, or full).
 
+**A batch is running out of time** — extend it rather than republishing;
+the content keeps its reference, since the stamp is what pays for the
+chunks, not the addressing. `StampManager.plan_topup(batch,
+ttl_secs=...)` prices it (also `total_ttl_secs=` to extend *to* a total,
+or `budget_bzz=` to cap the spend) and `topup(batch, plan.added_amount)`
+applies it, waiting out the ~40 s the node needs to index the change.
+Topups add to the remaining life, so a small one now costs nothing in
+the long run. An **expired** batch cannot be topped up — the node drops
+it — so monitor `batchTTL` (`list_batches()` + `StampInfo.problem(a_week)`)
+instead of finding out afterwards.
+
+**A batch is nearly full** (`utilizationRatio` close to 1.0 on an
+immutable batch — it dies when any single bucket fills) — that needs
+capacity, not time: `plan_dilute(batch, depth + 1)` / `dilute(...)`.
+Dilution costs only gas, but spreads the same balance over twice the
+chunks, roughly halving the remaining TTL per step — so dilute *first*,
+then top up, or you pay for time the dilution throws away.
+
 **"looks like a public gateway"** — swarmfs's default stance is "run your
 own node"; an endpoint where it can't detect that you own it (the
 node-owner `/stamps` API is unreachable) is treated as a shared public
