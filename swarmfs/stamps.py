@@ -20,11 +20,14 @@ The batch lifecycle after purchase, since it is easy to get wrong:
   *before* topping up or you pay for time you immediately throw away.
 * **Neither can resurrect an expired batch**: the node drops expired batches,
   and a topup against one fails. Renew while it is alive.
-* **A batch's ``amount`` is cumulative, not remaining** (learned live, after
-  it broke an assertion here): it counts from the creation block, so
-  ``amount / currentPrice * 5`` is the batch's *total* lifetime and the
-  elapsed part is already spent. Remaining life is the node's ``batchTTL``.
-  Only a topup's *added* amount converts straight to added time.
+* **Never derive remaining life from ``amount``** (learned live, twice, after
+  it broke assertions here). It counts from the creation block, so
+  ``amount / currentPrice * 5`` is *total* lifetime with the elapsed part
+  already spent; and it is the local issuer's own bookkeeping, which bee
+  increments in memory on a topup without persisting — it was seen to revert
+  to the creation value while the topups it had recorded remained in effect.
+  ``batchTTL`` is the field that tracks the chain. Only a topup's *added*
+  amount converts straight to added time.
 """
 
 from __future__ import annotations
@@ -40,20 +43,209 @@ from .exceptions import BeeAPIError, StampError  # noqa: F401 — StampError's c
 BLOCK_SECS = 5  # Gnosis chain block time
 PLUR_PER_BZZ = 10**16
 
-# upload size -> batch depth. Theoretical capacity is 2**depth * 4 KB, but
-# an immutable batch fails as soon as any SINGLE bucket (of 65536) fills —
-# measured live: one 42 MB upload filled a depth-18 batch (4 slots per
-# bucket). These tiers keep the balls-into-buckets overflow risk under ~5%
-# per upload.
-_DEPTH_TIERS = ((15 * 2**20, 18), (150 * 2**20, 19), (2**30, 20))
+CHUNK_SIZE = 4096
+BUCKET_DEPTH = 16  # bee: pkg/postage/stamp.go — BucketDepth is a constant
+BUCKETS = 1 << BUCKET_DEPTH
+MIN_DEPTH = BUCKET_DEPTH + 1
+"""Shallowest batch bee will sell. Verified live against Bee 2.8.1:
+``POST /stamps/1/16`` is rejected at parameter validation with
+``{"field": "depth", "error": "want min:17"}``. (swarm-bee's ``MIN_DEPTH``
+says 16, which the node does not accept.)"""
+DEFAULT_RISK = 0.01
+"""Default bucket-overflow risk :func:`suggest_depth` will accept.
+
+The consequence of losing that bet is a failed upload (HTTP 402 "batch is
+overissued"), recoverable by diluting one depth and retrying — not a lost
+batch. 1% trades that annoyance against the doubled cost of a deeper batch.
+Pass ``risk=`` to choose differently, or size exactly with
+:func:`depth_for_addresses` when the chunk addresses are known.
+"""
+
+BRANCHES = 128  # refs per intermediate chunk (bee: swarm.BmtBranches)
+ENC_BRANCHES = BRANCHES // 2  # encrypted refs are 64 bytes, so half as many
+
+# Bee's appendix-F erasure tables, verbatim from pkg/file/redundancy/level.go
+# (mediumEt/strongEt/insaneEt/paranoidEt and their enc* counterparts), as
+# {level: (shards, parities)} descending. Level 0 (NONE) has no table.
+_ET: dict[int, tuple[tuple[int, ...], tuple[int, ...]]] = {
+    1: ((95, 69, 47, 29, 15, 6, 2, 1), (9, 8, 7, 6, 5, 4, 3, 2)),
+    2: ((105, 96, 87, 78, 70, 62, 54, 47, 40, 33, 27, 21, 16, 11, 7, 4, 2, 1),
+        (21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4)),
+    3: ((93, 88, 83, 78, 74, 69, 64, 60, 55, 51, 46, 42, 38, 34, 30, 27, 23, 20,
+         17, 14, 11, 9, 6, 4, 3, 2, 1),
+        (31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14,
+         13, 12, 11, 10, 9, 8, 7, 6, 5)),
+    4: ((37, 36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20,
+         19, 18),
+        (89, 87, 86, 84, 83, 81, 80, 78, 76, 75, 73, 71, 70, 68, 66, 65, 63, 61,
+         59, 58)),
+}
+_ENC_ET: dict[int, tuple[tuple[int, ...], tuple[int, ...]]] = {
+    1: ((47, 34, 23, 14, 7, 3, 1), (9, 8, 7, 6, 5, 4, 3)),
+    2: ((52, 48, 43, 39, 35, 31, 27, 23, 20, 16, 13, 10, 8, 5, 3, 2, 1),
+        (21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5)),
+    3: ((46, 44, 41, 39, 37, 34, 32, 30, 27, 25, 23, 21, 19, 17, 15, 13, 11, 10,
+         8, 7, 5, 4, 3, 2, 1),
+        (31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14,
+         13, 12, 11, 10, 9, 8, 6)),
+    4: ((18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1),
+        (87, 84, 81, 78, 75, 71, 68, 65, 61, 58, 55, 52, 48, 45, 42, 39, 35, 32)),
+}
+_REPLICA_COUNTS = (0, 2, 4, 8, 16)  # bee: replicaCounts — dispersed root replicas
 
 
-def suggest_depth(size_bytes: int) -> int:
-    """Smallest batch depth that holds ``size_bytes`` with headroom."""
-    for limit, depth in _DEPTH_TIERS:
-        if size_bytes <= limit:
-            return depth
-    return 20 + math.ceil(math.log2(size_bytes / 2**30))
+def _parities(table, level: int, shards: int) -> int:
+    for s, p in zip(*table[level]):
+        if shards >= s:
+            return p
+    return 0
+
+
+def _group_shape(redundancy: int, encrypted: bool) -> tuple[int, int]:
+    """``(data chunks, parity chunks)`` per erasure group, mirroring bee's
+    ``redundancy.New()`` — note it takes ``maxParity`` from the *plain* table
+    even for encrypted uploads (pkg/file/redundancy/redundancy.go:47-55)."""
+    if redundancy not in range(5):
+        raise ValueError(f"redundancy must be 0-4, got {redundancy!r}")
+    if redundancy == 0:
+        return (ENC_BRANCHES if encrypted else BRANCHES), 0
+    if encrypted:
+        return (BRANCHES - _parities(_ENC_ET, redundancy, ENC_BRANCHES)) // 2, \
+            _parities(_ET, redundancy, ENC_BRANCHES)
+    return BRANCHES - _parities(_ET, redundancy, BRANCHES), \
+        _parities(_ET, redundancy, BRANCHES)
+
+
+def stamped_chunks(data_chunks: int, *, redundancy: int = 2,
+                   encrypted: bool = False) -> int:
+    """How many chunks bee actually stamps for ``data_chunks`` leaves.
+
+    A batch is filled by *stamped* chunks, not by payload bytes: every tree
+    level adds intermediates, erasure coding adds parity to each level, and
+    the root gets dispersed replicas. Levels ≥ 1 inflate the count by 7.6%
+    (MEDIUM) to 228% (PARANOID) plain, and more when encrypted — measured
+    from bee's own tables, which is why sizing must know both flags.
+    """
+    if data_chunks <= 0:
+        return 0
+    shards, parity = _group_shape(redundancy, encrypted)
+    total, level = 0, data_chunks
+    while level > 1:
+        groups = math.ceil(level / shards)
+        total += level + groups * parity
+        level = groups
+    return total + 1 + _REPLICA_COUNTS[redundancy]  # + root, + its replicas
+
+
+def overflow_risk(chunks: int, depth: int, *, loads: dict[int, int] | None = None) -> float:
+    """P(some bucket overflows) when ``chunks`` chunks with unpredictable
+    addresses are stamped on a batch of ``depth``.
+
+    ``loads`` optionally gives the bucket occupancy already present, as
+    ``{load: how many buckets have it}`` — from :func:`bucket_histogram` or
+    ``GET /stamps/{id}/buckets`` — so the estimate only has to be
+    probabilistic about the chunks whose addresses are genuinely unknown.
+
+    Poisson model over ``2**16`` buckets, each holding ``2**(depth-16)``.
+    Validated against a live batch: predicted 139.1/8.5/0.4 buckets with
+    ≥3/≥4/≥5 chunks, observed 126/6/0.
+    """
+    capacity = 1 << max(depth - BUCKET_DEPTH, 0)
+    counts = dict(loads) if loads else {0: BUCKETS}
+    if any(load > capacity for load in counts):
+        return 1.0  # already past capacity — an invalid state, not a risk
+    if chunks <= 0:
+        return 0.0
+    # Buckets with no room left are handled exactly: any chunk landing in one
+    # overflows, so the approximation must not smear that away (independence
+    # alone would report only 1-1/e for a batch whose every bucket is full).
+    full = sum(n for load, n in counts.items() if load >= capacity)
+    if full >= BUCKETS:
+        return 1.0
+    survive = (1.0 - full / BUCKETS) ** chunks
+    # ...and the rest with the usual independent-buckets Poisson approximation
+    lam = chunks / (BUCKETS - full)
+    for load, n_buckets in counts.items():
+        if load >= capacity:
+            continue
+        room = capacity - load
+        cdf = sum(math.exp(-lam) * lam**k / math.factorial(k) for k in range(room + 1))
+        survive *= min(cdf, 1.0) ** n_buckets
+    return 1.0 - survive
+
+
+def suggest_depth(size_bytes: int, *, redundancy: int = 2, encrypted: bool = False,
+                  risk: float = DEFAULT_RISK) -> int:
+    """Smallest batch depth whose buckets hold ``size_bytes`` at ``risk``.
+
+    An ESTIMATE, for when the data has not been split yet: it knows how many
+    chunks bee will stamp (:func:`stamped_chunks`, so ``redundancy`` and
+    ``encrypted`` matter) but not *where* they land, since a chunk's bucket
+    is the first 16 bits of its content address.
+
+    Prefer :func:`depth_for_addresses` when the addresses are known —
+    ``split()`` computes them offline, and for a plain upload that gives the
+    exact answer at zero risk. Measured on a live batch: this estimate put
+    depth 18 at 34% overflow risk for content whose true histogram fit it
+    exactly, with a maxed-out bucket to spare.
+    """
+    if size_bytes < 0:
+        raise ValueError(f"size_bytes must not be negative, got {size_bytes!r}")
+    if not 0.0 < risk < 1.0:
+        raise ValueError(f"risk must be a probability in (0, 1), got {risk!r}")
+    chunks = stamped_chunks(math.ceil(size_bytes / CHUNK_SIZE),
+                            redundancy=redundancy, encrypted=encrypted)
+    depth = MIN_DEPTH
+    while overflow_risk(chunks, depth) > risk:
+        depth += 1
+    return depth
+
+
+def bucket_histogram(addresses) -> dict[int, int]:
+    """``{load: how many buckets hold that many}`` for chunk ``addresses``.
+
+    Addresses may be 32-byte values or hex strings; the bucket is the first
+    ``BUCKET_DEPTH`` bits, exactly as bee's ``toBucket`` computes it. Buckets
+    holding nothing are included, so the counts sum to ``2**16``.
+    """
+    counts: dict[int, int] = {}
+    for addr in addresses:
+        if isinstance(addr, str):
+            addr = bytes.fromhex(addr)
+        if len(addr) < 4:
+            raise ValueError(f"chunk address too short: {addr.hex()}")
+        bucket = int.from_bytes(addr[:4], "big") >> (32 - BUCKET_DEPTH)
+        counts[bucket] = counts.get(bucket, 0) + 1
+    loads: dict[int, int] = {}
+    for load in counts.values():
+        loads[load] = loads.get(load, 0) + 1
+    loads[0] = BUCKETS - len(counts)
+    return loads
+
+
+def depth_for_addresses(addresses, *, extra_chunks: int = 0,
+                        risk: float = DEFAULT_RISK) -> int:
+    """Smallest depth that fits chunks whose addresses are already known.
+
+    With ``extra_chunks=0`` this is EXACT and carries no risk: the deepest
+    bucket decides, so the answer is ``16 + ceil(log2(max load))``. Pass the
+    whole tree from ``split(data)[1]`` for a plain (``redundancy=0``) upload.
+
+    When erasure coding is on, the parity chunks — and the intermediates,
+    whose fan-out changes — are generated by the node, so their addresses
+    cannot be known offline. Pass the leaf addresses and set
+    ``extra_chunks`` to how many unpredictable ones will be stamped, e.g.
+    ``stamped_chunks(n, redundancy=2) - n``; the known part stays exact and
+    only the remainder is modelled.
+    """
+    loads = bucket_histogram(addresses)
+    max_load = max(loads, default=0)
+    depth = MIN_DEPTH
+    while (1 << (depth - BUCKET_DEPTH)) < max_load:
+        depth += 1
+    while overflow_risk(extra_chunks, depth, loads=loads) > risk:
+        depth += 1
+    return depth
 
 
 def ttl_to_amount(ttl_secs: int, price: int) -> int:
@@ -68,13 +260,19 @@ def amount_to_ttl(amount: int, price: int) -> int:
     """Seconds of validity a per-chunk ``amount`` buys at ``price`` — the
     inverse of :func:`ttl_to_amount`.
 
-    Correct for an *added* amount (what a topup buys). It is NOT the
-    remaining life of an existing batch: a batch's ``amount`` field is
-    cumulative since creation, so it implies lifetime measured from the
-    creation block, and the elapsed part is already spent. Measured live:
-    ``amount`` 32954342400 at price 68657 implies 27.78 days, the batch was
-    3.79 days old, and the node reported 24.0 days left (within 0.06%). For
-    remaining life, read the node's ``batchTTL`` (``StampInfo.ttl``).
+    Correct for an *added* amount (what a topup buys). It is NOT a way to
+    learn an existing batch's remaining life — read ``batchTTL``
+    (``StampInfo.ttl``) for that. Two live findings, in order of discovery:
+
+    1. A batch's ``amount`` describes lifetime from its *creation block*, so
+       the elapsed part is already spent: 32954342400 at price 68657 implies
+       27.78 days on a batch 3.79 days old whose reported TTL was 24.0 days
+       (the three agree within 0.06%).
+    2. It is also not a reliable ledger. ``/stamps`` reports the local stamp
+       *issuer's* ``BatchAmount``, which bee's ``HandleTopUp`` increments in
+       memory (``pkg/postage/service.go:186``) without persisting; hours after
+       two confirmed topups the field had reverted to the creation value while
+       ``batchTTL`` still reflected both. Trust ``batchTTL``.
     """
     if price <= 0:
         raise ValueError(f"currentPrice must be positive, got {price!r}")
@@ -90,12 +288,65 @@ def batch_cost_bzz(amount: int, depth: int) -> float:
 
 @dataclass
 class BatchPlan:
-    """A priced purchase: buy with ``StampManager.buy(amount, depth)``."""
+    """A priced purchase: buy with ``StampManager.buy(amount, depth)``.
+
+    ``redundancy``/``encrypted`` record the upload shape the depth assumed —
+    uploading with a *higher* redundancy level than planned for means more
+    stamped chunks than the depth was sized for.
+    """
 
     depth: int
     amount: int
     ttl_secs: int  # actual validity after the chain's minimum is applied
     cost_bzz: float
+    redundancy: int = 2
+    encrypted: bool = False
+
+
+@dataclass
+class BucketStats:
+    """A batch's true bucket occupancy, from ``GET /stamps/{id}/buckets``.
+
+    ``max_load`` is what actually bounds further uploads: a chunk hashing
+    into a bucket already at ``capacity`` is refused on an immutable batch.
+    """
+
+    depth: int
+    bucket_depth: int
+    capacity: int  # chunks per bucket = 2**(depth - bucket_depth)
+    chunks: int  # total stamped
+    max_load: int  # fullest bucket
+    loads: dict[int, int]  # {load: how many buckets}
+
+    @property
+    def headroom(self) -> int:
+        """Free slots in the fullest bucket — 0 means the next chunk that
+        hashes there is refused (402 "batch is overissued")."""
+        return max(self.capacity - self.max_load, 0)
+
+    def risk_for(self, chunks: int) -> float:
+        """P(overflow) if ``chunks`` more chunks were stamped on this batch."""
+        return overflow_risk(chunks, self.depth, loads=self.loads)
+
+    @classmethod
+    def from_api(cls, d: dict) -> "BucketStats":
+        buckets = d.get("buckets") or []
+        loads: dict[int, int] = {}
+        total = 0
+        for b in buckets:
+            load = int(b.get("collisions", 0))
+            loads[load] = loads.get(load, 0) + 1
+            total += load
+        depth = int(d.get("depth", 0))
+        bucket_depth = int(d.get("bucketDepth", BUCKET_DEPTH))
+        return cls(
+            depth=depth,
+            bucket_depth=bucket_depth,
+            capacity=int(d.get("bucketUpperBound", 1 << max(depth - bucket_depth, 0))),
+            chunks=total,
+            max_load=max(loads, default=0),
+            loads=loads,
+        )
 
 
 @dataclass
@@ -159,8 +410,14 @@ class StampInfo:
 
     @property
     def bucket_capacity(self) -> int:
-        """Chunks one bucket holds. An immutable batch dies as soon as any
-        SINGLE bucket fills, so this — not ``2**depth`` — bounds an upload."""
+        """Chunks one bucket holds — ``2**(depth - bucket_depth)``.
+
+        This, not ``2**depth``, is what bounds an upload: a chunk hashing
+        into a full bucket is refused on an immutable batch (HTTP 402,
+        "batch is overissued"). The batch survives and keeps paying for what
+        it already stamped; diluting one depth doubles every bucket and lets
+        the upload through. ``utilization`` is the fullest bucket's count.
+        """
         return 2 ** max(self.depth - self.bucket_depth, 0)
 
     def problem(self, min_ttl: int) -> str | None:
@@ -218,7 +475,9 @@ class StampManager:
         # longest remaining TTL wins; ttl == -1 (unknown) sorts last
         return max(usable, key=lambda s: s.ttl if s.ttl >= 0 else -2).batch_id
 
-    async def plan(self, size_bytes: int, ttl_secs: int) -> BatchPlan:
+    async def plan(self, size_bytes: int, ttl_secs: int, *, redundancy: int = 2,
+                   encrypted: bool = False, risk: float = DEFAULT_RISK,
+                   depth: int | None = None) -> BatchPlan:
         """Price a batch for ``size_bytes`` lasting ``ttl_secs``, at the
         current on-chain price.
 
@@ -226,18 +485,27 @@ class StampManager:
         (24 h on Gnosis) at purchase time, and the price can move between
         planning and buying (rejected live at the exact minimum) — so the
         floor is padded by an hour.
+
+        Depth comes from :func:`suggest_depth`, so it depends on how the data
+        will be uploaded: ``redundancy`` (swarmfs writes level 2 by default)
+        and ``encrypted`` both add stamped chunks. Pass ``depth=`` to override
+        with an exact figure from :func:`depth_for_addresses`.
         """
         chain = await self._client.chainstate()
         price = int(chain["currentPrice"])
         floor = int(chain.get("minimumValidityBlocks", 0)) + 3600 // BLOCK_SECS
         blocks = max(math.ceil(ttl_secs / BLOCK_SECS), floor)
-        depth = suggest_depth(size_bytes)
+        if depth is None:
+            depth = suggest_depth(size_bytes, redundancy=redundancy,
+                                  encrypted=encrypted, risk=risk)
         amount = blocks * price
         return BatchPlan(
             depth=depth,
             amount=amount,
             ttl_secs=blocks * BLOCK_SECS,
             cost_bzz=batch_cost_bzz(amount, depth),
+            redundancy=redundancy,
+            encrypted=encrypted,
         )
 
     async def buy(self, amount: int, depth: int, *, wait_secs: int = 300) -> str:
@@ -294,6 +562,12 @@ class StampManager:
     async def get_batch(self, batch_id: str) -> StampInfo:
         """One batch's current state, parsed."""
         return StampInfo.from_api(await self._client.stamp_get(batch_id))
+
+    async def buckets(self, batch_id: str) -> BucketStats:
+        """The batch's true bucket occupancy — what actually bounds another
+        upload. Use ``BucketStats.risk_for(n)`` to size the next upload
+        against reality instead of estimating from bytes."""
+        return BucketStats.from_api(await self._client.stamp_buckets(batch_id))
 
     async def balance_bzz(self) -> float:
         """The node wallet's spendable xBZZ — what purchases draw on."""
@@ -392,6 +666,11 @@ class StampManager:
         ``check_balance`` refuses up front when the wallet cannot cover the
         cost (fail early, in the spirit of validating a stamp before an
         upload) rather than letting the transaction fail on chain.
+
+        Detection watches ``amount`` and ``batchTTL`` (see below); a topup so
+        small that it moves neither — under ~1 s of extra life — cannot be
+        confirmed this way and will raise after ``wait_secs`` even though the
+        transaction landed.
         """
         if added_amount <= 0:
             raise ValueError(f"added_amount must be positive, got {added_amount!r}")
@@ -427,10 +706,18 @@ class StampManager:
             raise StampError(f"topping up batch {batch_id} failed: {e} — {hint}") from None
 
         # from here on the money is spent: every failure path must carry the
-        # batch id and the tx, or a paid-for topup becomes unverifiable
+        # batch id and the tx, or a paid-for topup becomes unverifiable.
+        #
+        # Watch BOTH signals. `amount` is the local stamp issuer's bookkeeping
+        # (bee's HandleTopUp adds to it in memory — service.go:186 — and it
+        # reverts to the creation value when the issuer reloads, observed live
+        # hours after two successful topups), while `batchTTL` is derived from
+        # the batchstore and tracks the chain. Either moving means the node has
+        # applied the topup; requiring `amount` alone would eventually hang on
+        # a paid-for extension.
         return await self._await_applied(
             batch_id,
-            lambda info: info.amount > before.amount,
+            lambda info: info.amount > before.amount or info.ttl > before.ttl,
             what=f"topup (+{added_amount}, {cost:.4f} xBZZ)",
             tx=tx,
             wait_secs=wait_secs,

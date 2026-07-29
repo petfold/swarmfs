@@ -74,6 +74,22 @@ class SwarmClient:
         if resp.status == 404:
             raise FileNotFoundError(what)
         if resp.status == 402:
+            if "overissued" in detail:
+                # bee's ErrBucketFull: a chunk hashed into a bucket already at
+                # 2**(depth-bucket_depth). The batch is NOT lost — what it has
+                # stamped stays paid for — and diluting preserves the bucket
+                # counters, so +1 depth doubles every bucket and the same
+                # upload then succeeds with the same root (addressing is
+                # deterministic). See stamps.BucketStats for the true occupancy.
+                raise StampError(
+                    f"Bee API 402 for {what}: {detail} — the batch is full in "
+                    "at least one bucket, so this chunk cannot be stamped. "
+                    "Nothing already stored is lost. Recover by diluting one "
+                    "depth (PATCH /stamps/dilute/{batch}/{depth+1}, which "
+                    "doubles every bucket's capacity) and retrying — then top "
+                    "up, since dilution halves the remaining TTL. "
+                    "GET /stamps/{batch}/buckets shows the real headroom."
+                )
             raise StampError(
                 f"Bee API 402 (payment required) for {what}: {detail} — the "
                 "endpoint did not accept the postage stamp; check your batches "
@@ -264,6 +280,21 @@ class SwarmClient:
             await self._raise_for_status(resp, url)
             return (await resp.json())["batchID"]
 
+    async def stamp_buckets(self, batch_id: str) -> dict:
+        """GET /stamps/{id}/buckets — the batch's per-bucket occupancy.
+
+        Returns ``depth``/``bucketDepth``/``bucketUpperBound`` plus a
+        ``buckets`` list of all 65536 counters. This is the ground truth for
+        how much a batch can still take: an upload fails when a chunk hashes
+        into a bucket already at the upper bound, which the summary
+        ``utilizationRatio`` only approximates. The response is ~2 MB.
+        """
+        url = f"{self.api_url}/stamps/{batch_id}/buckets"
+        session = await self._get_session()
+        async with session.get(url) as resp:
+            await self._raise_for_status(resp, url)
+            return await resp.json()
+
     async def stamp_topup(self, batch_id: str, added_amount: int) -> str:
         """PATCH /stamps/topup/{id}/{amount} — extend a batch's life with
         the node wallet's xBZZ. ``added_amount`` is per chunk and ADDS to
@@ -451,6 +482,7 @@ for _name in (
     "stamps_list",
     "stamp_get",
     "stamp_buy",
+    "stamp_buckets",
     "stamp_topup",
     "stamp_dilute",
     "chainstate",

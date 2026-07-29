@@ -135,6 +135,33 @@ feed before consulting the listing cache.
       on `SWARMFS_TEST_BEE` alone. Renewal *policy* (a CLI, expiry warnings, mapping
       batches to publications) belongs to callers — swarmfs has no CLI by decision.
 
+## Batch sizing: derived, and exact where possible (2026-07-29)
+
+- [x] **Depth sizing from bee's own numbers.** The three hardcoded size→depth tiers are
+      gone. `stamped_chunks()` counts what a batch actually holds — leaves, per-level
+      erasure parity, intermediates, dispersed root replicas — from bee's appendix-F
+      tables (`pkg/file/redundancy/level.go`, ported verbatim), and `suggest_depth()`
+      solves the balls-into-buckets bound to an explicit `risk` (default 1%).
+      `plan()` forwards `redundancy`/`encrypted`/`risk` and records them on `BatchPlan`,
+      or takes `depth=` outright.
+- [x] **Exact sizing.** `bucket_histogram()` reproduces bee's `toBucket`
+      (`BigEndian.Uint32(addr[:4]) >> 16`) and `depth_for_addresses()` returns the
+      0%-risk depth when every address is known — which `split()` provides for a plain
+      upload — leaving only node-generated parity to `extra_chunks`. Measured: 2 MB of
+      random data needs depth 17 exactly, where the byte estimate says 18 (half the cost).
+- [x] **Bucket truth from the node.** `SwarmClient.stamp_buckets()` +
+      `StampManager.buckets() -> BucketStats` (`max_load`, `headroom`, `risk_for(n)`),
+      cross-validated live against `/stamps` (its `utilization` *is* the fullest bucket).
+- [x] **402 "batch is overissued" now explains the recovery** (dilute one depth, retry,
+      top up) instead of reading like a dead stamp.
+      *Findings pinned by tests:* encryption raises the chunk count by up to **1.7×** at
+      PARANOID, not the ~1% claimed earlier (that came from misreading which table
+      `maxParity` uses); `MIN_DEPTH` is **17**, verified by the node rejecting depth 16
+      (`want min:17`) — swarm-bee's constant says 16; a bucket-full batch is **not**
+      destroyed and dilution reopens it because the counters are preserved; and
+      re-stamping an address the same batch already stamped costs no bucket slot
+      (`stamper.Stamp` reuses the stored index, stamper.go:47-58).
+
 ## Local addressing (2026-07-28)
 
 - [x] **Splitter** (`swarmfs/splitter.py`): `split(data) -> (root, chunks)` and

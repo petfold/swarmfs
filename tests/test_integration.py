@@ -444,16 +444,27 @@ def test_stamp_inspection_and_planning_live():
             # topping up ADDS: the plan's total is remaining + purchased
             assert by_week.total_ttl_secs == max(info.ttl, 0) + by_week.added_ttl_secs
 
-            # a batch's `amount` is CUMULATIVE from its creation block, so it
-            # implies total lifetime, not remaining life (this assertion is
-            # how that was discovered — it failed by exactly the batch's age)
+            # `amount` is NOT a source of truth for remaining life — it
+            # describes lifetime from the creation block, and it is the local
+            # issuer's bookkeeping, which bee increments in memory on a topup
+            # without persisting (seen live to revert to the creation value
+            # while the topups stayed in effect). Both assertions below failed
+            # against a real batch before being weakened to what actually
+            # holds: amount only ever implies a lifetime, never a remainder.
             chain = await client.chainstate()
             price = int(chain["currentPrice"])
             age_secs = (int(chain["block"]) - info.block_number) * 5
-            assert amount_to_ttl(info.amount, price) == pytest.approx(
-                max(info.ttl, 0) + age_secs, rel=0.02), (
-                "amount/price*5 should equal remaining TTL plus the batch's "
-                "age; a large gap means the price moved since purchase")
+            implied = amount_to_ttl(info.amount, price)
+            assert implied > 0
+            assert info.ttl > 0
+            # Deliberately NO assertion relating the two. Two successive
+            # attempts here failed against this very batch: first
+            # `implied == ttl` (off by exactly the batch's age), then
+            # `ttl <= implied + age` (broken once the issuer's amount reverted
+            # while topped-up TTL remained — live: implied 2396540 + age
+            # 340940 against a real 3465968). The node's own bookkeeping makes
+            # amount and batchTTL independent; only batchTTL is authoritative.
+            assert age_secs >= 0
 
             # dilution is priced in TTL, and only ever upward
             dil = await mgr.plan_dilute(STAMP, info.depth + 1)
@@ -494,10 +505,61 @@ def test_topup_extends_a_real_batch_live():
                 pytest.skip(f"wallet cannot cover {plan.cost_bzz:.4f} xBZZ")
 
             after = await mgr.topup(STAMP, plan.added_amount)
-            assert after.amount - before.amount == plan.added_amount, (
-                "a topup must ADD to the batch's balance, not replace it")
-            assert after.ttl > before.ttl - 60  # drained a little meanwhile
+            # batchTTL is the authoritative signal: it must have grown by
+            # roughly what was bought, allowing for drain during the ~40 s the
+            # node takes to index the event.
+            gained = after.ttl - before.ttl
+            assert gained == pytest.approx(plan.added_ttl_secs, rel=0.05), (
+                f"expected ~{plan.added_ttl_secs}s more life, got {gained}s")
             assert after.depth == before.depth  # topup never changes capacity
+            # `amount` is the local issuer's bookkeeping (bee increments it in
+            # memory without persisting), so it may or may not have moved —
+            # when it does, the delta must be exactly what was paid for.
+            if after.amount != before.amount:
+                assert after.amount - before.amount == plan.added_amount, (
+                    "a topup must ADD to the batch's balance, not replace it")
+        finally:
+            await client.close()
+
+    asyncio.run(main())
+
+
+@pytest.mark.skipif(not STAMP, reason="needs SWARMFS_TEST_STAMP to inspect")
+def test_bucket_occupancy_agrees_with_the_summary_live():
+    """Read-only: GET /stamps/{id}/buckets parsed into BucketStats must agree
+    with what GET /stamps/{id} summarises, cross-checking our parsing against
+    two independent endpoints — and confirming that `utilization` really is
+    the fullest bucket's load, which is what bounds the next upload.
+    """
+    import asyncio
+
+    from swarmfs._client import SwarmClient
+    from swarmfs.stamps import BUCKET_DEPTH, StampManager, suggest_depth
+
+    async def main():
+        client = SwarmClient(BEE)
+        try:
+            mgr = StampManager(client)
+            info = await mgr.get_batch(STAMP)
+            stats = await mgr.buckets(STAMP)
+
+            assert stats.depth == info.depth
+            assert stats.bucket_depth == info.bucket_depth == BUCKET_DEPTH
+            assert stats.capacity == 1 << (info.depth - info.bucket_depth)
+            assert sum(stats.loads.values()) == 1 << BUCKET_DEPTH
+            # the summary's utilization IS the fullest bucket
+            assert stats.max_load == info.utilization
+            if info.utilization_ratio is not None:
+                assert stats.max_load / stats.capacity == pytest.approx(
+                    info.utilization_ratio, rel=1e-6)
+            assert stats.headroom == stats.capacity - stats.max_load
+            assert 0.0 <= stats.risk_for(1) <= 1.0
+
+            # sizing this batch's own content from bytes alone is pessimistic
+            # compared with what the true histogram shows actually fits
+            from_bytes = suggest_depth(stats.chunks * 4096, redundancy=0)
+            exact_enough = BUCKET_DEPTH + max(stats.max_load - 1, 1).bit_length()
+            assert exact_enough <= from_bytes
         finally:
             await client.close()
 

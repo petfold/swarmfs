@@ -39,6 +39,22 @@ def test_status_mapping():
     assert ei.value.status == 500 and ei.value.detail == "boom"
 
 
+def test_bucket_full_402_explains_the_recovery():
+    """Bee returns 402 "batch is overissued" when a chunk hashes into a full
+    bucket (ErrBucketFull). That is recoverable and does not lose the batch,
+    so the error must say so rather than read like a dead stamp."""
+    with pytest.raises(StampError) as e:
+        _raise(402, "batch is overissued")
+    msg = str(e.value)
+    assert "Nothing already stored is lost" in msg
+    assert "diluting one depth" in msg and "retrying" in msg
+    assert "top up" in msg  # dilution halves the remaining TTL
+    assert "buckets" in msg  # where to see the real headroom
+    # the generic 402 (no stamp accepted) keeps its own advice
+    with pytest.raises(StampError, match="swarm-cli stamp buy"):
+        _raise(402, "batch not usable")
+
+
 def test_hierarchy():
     # gateway detection and generic IO handling catch these as before
     assert issubclass(BeePermissionError, PermissionError)

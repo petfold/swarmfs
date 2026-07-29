@@ -37,8 +37,9 @@ pandas/dask/zarr experience matter most. Swarm-native mutable-filesystem use
    the mutable filesystem; `bzz://` is immutable.
 3. **Payment.** Writing costs money and needs a valid postage stamp (batch). Stamps live in
    `storage_options`. A stamp manager checks usability/TTL *before* a commit and fails early
-   with a useful error, never a mid-write 402. Payment is also *ongoing*: a batch expires,
-   and its content dies with it — see "Stamp lifecycle" below.
+   with a useful error, never a mid-write 402. Payment is also *ongoing*: when a batch
+   expires its chunks stop being paid for and become the first candidates for eviction,
+   so treat expiry as loss (the exact window is unpredictable) — see "Stamp lifecycle".
 
 ## The listing problem (CRITICAL architectural point)
 
@@ -171,11 +172,18 @@ endpoints already exist.
   `tests/test_stamps.py`, so don't "simplify" the arithmetic away):
   - A topup is **additive**: the applied `amount` delta equals exactly what was
     paid. Verified twice on one batch (+1 xBZZ → +16.08 d; +6 h → +0.25 d).
-  - **`amount` is cumulative from `blockNumber`**, not remaining balance:
-    `amount / currentPrice * 5` is *total* lifetime, elapsed part included.
-    Found when an integration assertion failed by exactly the batch's age
-    (27.78 d implied vs 24.0 d reported, batch 3.79 d old). Remaining life is
-    always the node's `batchTTL`.
+  - **`amount` is never a source of truth for remaining life** — two live
+    findings, both caught by integration assertions failing. (1) It describes
+    lifetime from `blockNumber`, elapsed part included: 27.78 d implied vs
+    24.0 d reported on a 3.79-d-old batch. (2) It is the *local issuer's*
+    bookkeeping, which bee's `HandleTopUp` increments in memory without
+    persisting (`pkg/postage/service.go:186`); hours after two confirmed
+    topups it had reverted to the creation value while `batchTTL` still
+    reflected both. So no inequality between `amount` and `batchTTL` holds —
+    the integration test asserts none, deliberately. `batchTTL` (from the
+    batchstore, `estimateBatchTTLFromID`) is authoritative. This also forced
+    `topup()` to accept a `batchTTL` jump as proof of application, not just an
+    `amount` increase, or a paid-for topup would hang until timeout.
   - The node **indexes a topup ~40 s after the tx returns** (41.8 s measured),
     so an immediate read shows the old amount while the wallet is already
     debited — indistinguishable from a silent failure. `_await_applied` polls.
@@ -186,6 +194,49 @@ endpoints already exist.
     `plan_topup().warning` encodes that ordering instead of documenting it.
   - **An expired batch cannot be revived**: the node drops it, and a topup
     against it fails. Renewal is prevention, not repair.
+  - **Bucket overflow does not destroy a batch** (corrected from Bee's own
+    source, `pkg/postage/stampissuer.go:186` + `pkg/api/bzz.go:219`, after we
+    had it wrong in comments and docs): a chunk hashing into a full bucket is
+    refused on an **immutable** batch — `ErrBucketFull` → HTTP 402 "batch is
+    overissued" — so the *upload* fails while the batch and everything it has
+    already stamped survive, still paid for. Recovery is a dilution: depth+1
+    doubles every bucket and the counters are preserved, so the retry
+    succeeds and (addressing being deterministic) yields the same root. On a
+    **mutable** batch the counter resets and the stamp index is reused,
+    silently invalidating the chunk stamped there before — immutability buys
+    a loud failure instead of a quiet one.
+  - **Depth sizing is now derived, not folklore** (implemented; the three
+    hardcoded tiers are gone). A batch is filled by *stamped* chunks, so
+    `stamped_chunks()` counts them from bee's own appendix-F erasure tables
+    (`pkg/file/redundancy/level.go`, ported verbatim) — leaves, per-level
+    parity, intermediates and dispersed root replicas — and `suggest_depth`
+    then solves the balls-into-buckets bound to an explicit `risk`
+    (`DEFAULT_RISK = 1%`). Both `redundancy` and `encrypted` change the
+    answer: inflation is 1.08/1.20/1.32/3.45 plain for MEDIUM/STRONG/INSANE/
+    PARANOID and higher encrypted, up to **1.7× more at PARANOID** — an
+    earlier claim here that encryption was ~1% was wrong (it came from
+    misreading which table `maxParity` uses; bee's `New()` takes it from the
+    *plain* table even for encrypted uploads, redundancy.go:47-55).
+  - **Better still, sizing can be exact.** `depth_for_addresses()` builds the
+    real bucket histogram from known chunk addresses — `bucket_histogram()`
+    reproduces bee's `toBucket` exactly (`BigEndian.Uint32(addr[:4]) >> 16`,
+    stampissuer.go:384) — so a plain upload gets a 0%-risk depth from
+    `split()` output, and only node-generated parity stays probabilistic
+    (pass it as `extra_chunks`). Worth it: 2 MB of random data sizes to depth
+    17 exactly where the byte estimate says 18, i.e. half the cost. The live
+    demo batch made the same point in reverse — the estimate called depth 18
+    a 34% risk for content whose true histogram fit it exactly.
+    `StampManager.buckets()` (`GET /stamps/{id}/buckets`, 65536 counters)
+    gives the same truth for a batch you already own.
+  - **`MIN_DEPTH` is 17, not 16.** Verified live: `POST /stamps/1/16` is
+    rejected with `{"field": "depth", "error": "want min:17"}`. (swarm-bee's
+    `MIN_DEPTH` constant says 16, which the node refuses.)
+  - **Re-stamping a chunk already stamped by the same batch is free.**
+    `stamper.Stamp` looks up `StampItem{BatchID, chunkAddress}` and, when it
+    exists, refreshes the timestamp and reuses the stored batch index without
+    calling `increment` (stamper.go:47-58) — so uploading identical content
+    twice on one batch consumes no extra bucket slots, and address-keyed
+    dedup in `split()` matches what the node will actually stamp.
 - **Live tests are opt-in by cost**: the inspection/planning integration test
   spends nothing (runs on `SWARMFS_TEST_BEE` alone); the one test that really
   tops up is gated on `SWARMFS_TEST_SPEND=<xBZZ budget>` — an explicit amount
@@ -306,9 +357,11 @@ gateway selection/fallback (see next section).
 
 ## Packaging & CI (decided, implemented)
 
-- **Version**: `0.3.0` (the stamp-lifecycle release; `0.2.0` was local
-  addressing, `0.1.0` the first real one, bumped from the placeholder
-  `0.1.0.dev0`). Live in both `pyproject.toml` and `swarmfs/__init__.py` —
+- **Version**: `0.4.0` (derived batch sizing + the topup-detection fix; `0.3.0`
+  was the stamp lifecycle, `0.2.0` local addressing, `0.1.0` the first real
+  one, bumped from the placeholder `0.1.0.dev0`). A minor bump, not a patch:
+  `suggest_depth` returns different depths than 0.3.0 for the same size, and
+  swarmlite re-exports it. Live in both `pyproject.toml` and `swarmfs/__init__.py` —
   keep these two in sync on every bump. `.devN`/pre-release suffixes are
   excluded from `pip install` by default; a plain version with the "Alpha"
   classifier is the intended shape — the classifier signals maturity, the

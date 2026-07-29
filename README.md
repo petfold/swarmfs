@@ -143,10 +143,17 @@ available but never implicit. Every `plan_*` call is a pure question; only the
 verbs move money:
 
 ```python
-from swarmfs.stamps import StampManager
+from swarmfs.stamps import StampManager, depth_for_addresses, stamped_chunks
 
 plan = await mgr.plan(size_bytes, ttl_secs)   # depth, amount, cost in xBZZ
 batch = await mgr.buy(plan.amount, plan.depth)  # spends the node wallet's xBZZ
+
+# depth depends on how you will upload: erasure parity and encryption add
+# stamped chunks, and a batch dies of a full *bucket*, not of full capacity
+plan = await mgr.plan(size_bytes, ttl_secs, redundancy=4, encrypted=True)
+# ...or skip the statistics entirely — a plain upload's addresses are known
+root, chunks = swarmfs.split(data)
+plan = await mgr.plan(size_bytes, ttl_secs, depth=depth_for_addresses(chunks))
 
 # renewal: extend BY a duration, TO a total, or for at most a budget
 plan = await mgr.plan_topup(batch, ttl_secs=30 * 86400)
@@ -160,15 +167,18 @@ print((await mgr.plan_dilute(batch, 20)).ttl_after_secs)   # ~halved per step
 Four things about renewal that are easy to get wrong, so swarmfs encodes them:
 a topup **adds** to the remaining life rather than restarting it; a nearly-full
 **immutable** batch should be diluted *before* topping up, or the dilution
-halves away part of what you just bought (`plan_topup().warning` says so); a
-batch's `amount` is *cumulative since creation*, so remaining life is the
-node's `batchTTL`, never `amount / currentPrice`; and an expired batch cannot
-be revived, so renew while it lives. The node also takes ~40 s to index a
-topup — `topup()` polls, because reading straight after the transaction shows
-the old value and looks like a silent failure.
+halves away part of what you just bought (`plan_topup().warning` says so);
+remaining life is the node's `batchTTL` and *never* `amount / currentPrice`
+(that field describes lifetime from the creation block, and is local
+bookkeeping that can revert); and an expired batch cannot be revived, so renew
+while it lives. The node also takes ~40 s to index a topup — `topup()` polls,
+because reading straight after the transaction shows the old value and looks
+like a silent failure.
 
 For monitoring, `mgr.list_batches()` plus `StampInfo.problem(min_ttl)` turns
-"still usable" into "needs renewing" at whatever threshold you choose.
+"still usable" into "needs renewing" at whatever threshold you choose, and
+`mgr.buckets(batch)` reports the true per-bucket headroom that bounds the next
+upload — `utilizationRatio` only summarises it.
 
 `plan` sizes the batch for your upload (bucket-overflow-aware) and prices it
 from the chain; `buy` purchases and waits until the batch is usable. Nothing in

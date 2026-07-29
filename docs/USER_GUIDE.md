@@ -502,12 +502,20 @@ the long run. An **expired** batch cannot be topped up — the node drops
 it — so monitor `batchTTL` (`list_batches()` + `StampInfo.problem(a_week)`)
 instead of finding out afterwards.
 
-**A batch is nearly full** (`utilizationRatio` close to 1.0 on an
-immutable batch — it dies when any single bucket fills) — that needs
-capacity, not time: `plan_dilute(batch, depth + 1)` / `dilute(...)`.
-Dilution costs only gas, but spreads the same balance over twice the
-chunks, roughly halving the remaining TTL per step — so dilute *first*,
-then top up, or you pay for time the dilution throws away.
+**`402 "batch is overissued"` / a batch is nearly full**
+(`utilizationRatio` close to 1.0) — a chunk hashed into a bucket that is
+already full. On an immutable batch Bee refuses that chunk, so the upload
+fails; the batch is **not** destroyed and everything already stamped keeps
+its stamp. That needs capacity, not time: `plan_dilute(batch, depth + 1)` /
+`dilute(...)`, which doubles every bucket's capacity while preserving the
+counters — then retry, and since addressing is deterministic you get the
+same root back. Dilution costs only gas, but spreads the same balance over
+twice the chunks, roughly halving the remaining TTL per step, so dilute
+*first* and top up after, or you pay for time the dilution throws away.
+
+(On a *mutable* batch the same collision instead resets the bucket counter
+and reuses the stamp index, silently invalidating the chunk stamped there
+before — so immutability turns quiet data loss into a loud 402.)
 
 **"looks like a public gateway"** — swarmfs's default stance is "run your
 own node"; an endpoint where it can't detect that you own it (the

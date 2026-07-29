@@ -74,7 +74,15 @@ def test_unknown_ttl_is_usable_but_last_choice():
 # ---------------------------------------------------------------------------
 
 from swarmfs.exceptions import BeeAPIError
-from swarmfs.stamps import BatchPlan, suggest_depth
+from swarmfs.stamps import (
+    MIN_DEPTH,
+    BatchPlan,
+    bucket_histogram,
+    depth_for_addresses,
+    overflow_risk,
+    stamped_chunks,
+    suggest_depth,
+)
 
 MB = 2**20
 
@@ -105,13 +113,75 @@ class BuyClient(StampsOnlyClient):
         return step
 
 
-def test_suggest_depth_bucket_overflow_tiers():
-    assert suggest_depth(1 * MB) == 18
-    assert suggest_depth(15 * MB) == 18
-    assert suggest_depth(16 * MB) == 19  # a 42 MB upload filled depth 18 live
-    assert suggest_depth(150 * MB) == 19
-    assert suggest_depth(1024 * MB) == 20
-    assert suggest_depth(2048 * MB) == 21
+def test_suggest_depth_is_monotonic_and_respects_the_minimum():
+    sizes = [1, 6, 15, 42, 100, 600, 1024, 4096]
+    depths = [suggest_depth(mb * MB) for mb in sizes]
+    assert depths == sorted(depths), depths
+    # bee refuses anything shallower than 17 (verified live: "want min:17")
+    assert suggest_depth(1) == MIN_DEPTH == 17
+    assert suggest_depth(0) == MIN_DEPTH
+
+
+def test_suggest_depth_prevents_the_historical_failure():
+    """A 42 MB upload filled a depth-18 batch live. At swarmfs's default
+    redundancy the model puts that at ~13%, so it must pick 19."""
+    assert suggest_depth(42 * MB, redundancy=2) == 19
+    assert overflow_risk(stamped_chunks(42 * MB // 4096, redundancy=2), 18) > 0.1
+    assert overflow_risk(stamped_chunks(42 * MB // 4096, redundancy=2), 19) < 0.001
+
+
+def test_suggest_depth_tightens_with_redundancy_and_encryption():
+    # PARANOID stamps 3.4x the chunks, so it needs more room for the same data
+    assert suggest_depth(15 * MB, redundancy=0) == 18
+    assert suggest_depth(15 * MB, redundancy=4) == 19
+    # ... and the old redundancy-blind tiers would have said 18 for both,
+    # which runs ~11% overflow risk at PARANOID
+    assert overflow_risk(stamped_chunks(15 * MB // 4096, redundancy=4), 18) > 0.1
+    # encryption adds chunks too (up to 1.66x at PARANOID), so it can only
+    # ever push the depth up, never down
+    for mb in (1, 15, 42, 150, 600):
+        for lv in range(5):
+            plain = suggest_depth(mb * MB, redundancy=lv)
+            enc = suggest_depth(mb * MB, redundancy=lv, encrypted=True)
+            assert enc >= plain, (mb, lv, plain, enc)
+    # and at PARANOID the 1.7x gap is big enough to change the depth outright
+    # for many sizes — the claim that encryption is negligible was wrong
+    crossings = [mb for mb in range(1, 2000, 3)
+                 if suggest_depth(mb * MB, redundancy=4, encrypted=True)
+                 > suggest_depth(mb * MB, redundancy=4)]
+    assert crossings, "encryption should change the suggested depth somewhere"
+
+
+def test_suggest_depth_risk_is_a_dial():
+    size = 42 * MB
+    assert suggest_depth(size, risk=0.5) < suggest_depth(size, risk=0.01)
+    # a tighter target can never suggest a shallower batch
+    depths = [suggest_depth(size, risk=r) for r in (0.5, 0.1, 0.01, 1e-6)]
+    assert depths == sorted(depths)
+    for bad in (0, 1, -0.1, 1.5):
+        with pytest.raises(ValueError, match="probability"):
+            suggest_depth(size, risk=bad)
+
+
+def test_stamped_chunks_matches_bees_group_shapes():
+    # NONE: 1000 leaves + 8 intermediates + 1 root, no parity, no replicas
+    assert stamped_chunks(1000, redundancy=0) == 1009
+    # STRONG groups 107 data + 21 parity (bee's strongEt at 128 shards):
+    # 1000 + ceil(1000/107)*21 = 1210, then 10 intermediates + 21 parity,
+    # + root + 4 dispersed replicas
+    assert stamped_chunks(1000, redundancy=2) == 1000 + 10 * 21 + 10 + 21 + 1 + 4
+    assert stamped_chunks(0) == 0
+    factors = [stamped_chunks(10_000, redundancy=lv) for lv in range(5)]
+    assert factors == sorted(factors)  # more redundancy, more chunks
+    # encryption raises every level (the correction: not ~1%, up to 1.66x)
+    for lv in range(1, 5):
+        plain = stamped_chunks(10_000, redundancy=lv)
+        enc = stamped_chunks(10_000, redundancy=lv, encrypted=True)
+        assert enc > plain, lv
+    assert stamped_chunks(10_000, redundancy=4, encrypted=True) / \
+        stamped_chunks(10_000, redundancy=4) == pytest.approx(1.7, abs=0.1)
+    with pytest.raises(ValueError, match="redundancy must be 0-4"):
+        stamped_chunks(10, redundancy=5)
 
 
 def test_plan_pads_the_chain_minimum():
@@ -120,11 +190,23 @@ def test_plan_pads_the_chain_minimum():
     plan = asyncio.run(mgr.plan(10 * MB, ttl_secs=3600))
     assert plan == BatchPlan(
         depth=18, amount=floor * 1000, ttl_secs=floor * 5,
-        cost_bzz=floor * 1000 * 2**18 / 10**16,
+        cost_bzz=floor * 1000 * 2**18 / 10**16, redundancy=2, encrypted=False,
     )
     week = 7 * 86400
     plan = asyncio.run(mgr.plan(10 * MB, ttl_secs=week))
     assert plan.amount == (week // 5) * 1000
+
+
+def test_plan_records_the_upload_shape_it_sized_for():
+    mgr = StampManager(BuyClient())
+    paranoid = asyncio.run(mgr.plan(15 * MB, 86400, redundancy=4))
+    assert (paranoid.depth, paranoid.redundancy) == (19, 4)
+    # cost follows the depth it chose, not the payload size
+    plain = asyncio.run(mgr.plan(15 * MB, 86400, redundancy=0))
+    assert plain.depth == 18 and paranoid.cost_bzz == 2 * plain.cost_bzz
+    # an exact depth (from depth_for_addresses) overrides the estimate
+    exact = asyncio.run(mgr.plan(15 * MB, 86400, depth=17))
+    assert exact.depth == 17
 
 
 def test_buy_polls_through_the_confirmation_window(monkeypatch):
@@ -171,6 +253,104 @@ def test_buy_maps_rejections_to_actionable_hints():
     client = BuyClient(buy_error=BeeAPIError(500, "fake://stamps", "wallet empty"))
     with pytest.raises(StampError, match="xBZZ or xDAI"):
         asyncio.run(StampManager(client).buy(1, 18))
+
+
+# ---------------------------------------------------------------------------
+# exact sizing from known chunk addresses, and the real bucket histogram
+#
+# LIVE_LOADS is the demo batch's actual occupancy, measured 2026-07-29 via
+# GET /stamps/<id>/buckets: 16279 chunks over 65536 buckets, fullest bucket
+# 4 (matching the summary utilization=4, utilizationRatio=0.5 at depth 19).
+# ---------------------------------------------------------------------------
+
+LIVE_LOADS = {0: 51070, 1: 12785, 2: 1555, 3: 120, 4: 6}
+LIVE_CHUNKS = sum(load * n for load, n in LIVE_LOADS.items())
+
+
+def _addresses_with_loads(loads: dict[int, int]) -> list[bytes]:
+    """Synthesize chunk addresses realizing a given bucket histogram."""
+    out, bucket = [], 0
+    for load, n_buckets in sorted(loads.items()):
+        if load == 0:
+            bucket += n_buckets
+            continue
+        for _ in range(n_buckets):
+            prefix = (bucket << (32 - 16)).to_bytes(4, "big")
+            out += [prefix + bytes(28) for _ in range(load)]
+            bucket += 1
+    return out
+
+
+def test_live_histogram_is_consistent_and_matches_the_summary():
+    assert LIVE_CHUNKS == 16279
+    assert sum(LIVE_LOADS.values()) == 65536
+    assert max(LIVE_LOADS) == 4  # == the batch's reported utilization
+    # utilizationRatio 0.5 at depth 19: 4 of 2**(19-16)
+    assert max(LIVE_LOADS) / 2 ** (19 - 16) == 0.5
+
+
+def test_overflow_risk_reproduces_the_live_measurement():
+    """The estimate said depth 18 was a coin-flip-ish gamble for content whose
+    true histogram fit depth 18 exactly — the case for exact sizing."""
+    assert overflow_risk(LIVE_CHUNKS, 18) == pytest.approx(0.34, abs=0.02)
+    assert overflow_risk(LIVE_CHUNKS, 19) < 1e-3
+    # and the model's per-bucket predictions matched the observed histogram
+    # (139.1/8.5/0.4 expected buckets with >=3/>=4/>=5; observed 126/6/0)
+    assert overflow_risk(LIVE_CHUNKS, 17) > 0.99  # cap 2, hopeless
+
+
+def test_overflow_risk_accounts_for_existing_occupancy():
+    # the same batch, viewed at its real depth: adding a little is safe...
+    assert overflow_risk(100, 19, loads=LIVE_LOADS) < 0.01
+    # ...adding a lot is not, and it is riskier than starting from empty
+    assert overflow_risk(20_000, 19, loads=LIVE_LOADS) > overflow_risk(20_000, 19)
+    # a bucket already at capacity means the next chunk can always collide
+    assert overflow_risk(1, 18, loads={4: 65536}) == 1.0
+    assert overflow_risk(0, 19, loads=LIVE_LOADS) == 0.0  # nothing to add
+
+
+def test_bucket_histogram_matches_bees_toBucket():
+    # bucket = the first 16 bits of the address, big-endian
+    addr = bytes([0xAB, 0xCD]) + bytes(30)
+    assert bucket_histogram([addr]) == {1: 1, 0: 65535}
+    assert bucket_histogram([addr, addr.hex()]) == {2: 1, 0: 65535}  # hex accepted
+    # two addresses differing below the 16-bit prefix share a bucket
+    other = bytes([0xAB, 0xCD, 0xFF]) + bytes(29)
+    assert bucket_histogram([addr, other]) == {2: 1, 0: 65535}
+    # ...and differing inside it do not
+    apart = bytes([0xAB, 0xCE]) + bytes(30)
+    assert bucket_histogram([addr, apart]) == {1: 2, 0: 65534}
+    assert bucket_histogram([]) == {0: 65536}
+    with pytest.raises(ValueError, match="too short"):
+        bucket_histogram([b"\x01\x02"])
+
+
+def test_depth_for_addresses_is_exact_when_nothing_is_unpredictable():
+    """With every address known, the deepest bucket decides — no probability
+    involved. This is the redundancy=0 path: split() gives the whole tree."""
+    for max_load, want_depth in ((1, 17), (2, 17), (3, 18), (4, 18), (5, 19), (9, 20)):
+        addrs = _addresses_with_loads({max_load: 1, 1: 10})
+        assert depth_for_addresses(addrs) == want_depth, max_load
+        # exact means exactly that: zero risk at the depth it returns
+        assert overflow_risk(0, want_depth, loads=bucket_histogram(addrs)) == 0.0
+    # the live content: max load 4 fits depth 18, which the estimate feared
+    assert depth_for_addresses(_addresses_with_loads(LIVE_LOADS)) == 18
+    assert suggest_depth(LIVE_CHUNKS * 4096, redundancy=0) == 19  # the estimate
+
+
+def test_depth_for_addresses_models_only_the_unknown_part():
+    addrs = _addresses_with_loads({4: 6, 3: 120, 2: 1555, 1: 12785})
+    exact = depth_for_addresses(addrs)
+    # parity chunks the node will generate have unpredictable addresses, so
+    # they can only push the depth up
+    n = len(addrs)
+    extra = stamped_chunks(n, redundancy=2) - n
+    assert depth_for_addresses(addrs, extra_chunks=extra) >= exact
+    # ...and asking for a stricter risk can only push it up further
+    loose = depth_for_addresses(addrs, extra_chunks=extra, risk=0.5)
+    strict = depth_for_addresses(addrs, extra_chunks=extra, risk=1e-9)
+    assert loose <= strict
+    assert depth_for_addresses([]) == MIN_DEPTH
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +402,7 @@ class RenewClient(StampsOnlyClient):
     """
 
     def __init__(self, batch=None, price=LIVE_PRICE, bzz_plur=LIVE_WALLET_PLUR,
-                 states=None, tx_error=None):
+                 states=None, tx_error=None, buckets=None):
         batch = LIVE_BATCH if batch is None else batch
         super().__init__([batch])
         self._batch = batch
@@ -230,8 +410,12 @@ class RenewClient(StampsOnlyClient):
         self._bzz = bzz_plur
         self._states = iter(states) if states is not None else None
         self._tx_error = tx_error
+        self._buckets = buckets
         self.topups: list[tuple[str, int]] = []
         self.dilutions: list[tuple[str, int]] = []
+
+    async def stamp_buckets(self, batch_id):
+        return self._buckets or {"depth": 19, "bucketDepth": 16, "buckets": []}
 
     async def chainstate(self):
         return {"currentPrice": str(self._price), "minimumValidityBlocks": 17280}
@@ -284,7 +468,7 @@ def test_amount_and_ttl_conversions_round_trip():
         )
 
 
-def test_a_batchs_amount_is_cumulative_not_remaining():
+def test_amount_describes_lifetime_from_creation_not_what_remains():
     """Learned live, after it broke an integration assertion: ``amount``
     counts from the creation block, so it implies TOTAL lifetime. Remaining
     life is the node's ``batchTTL`` — never re-derive it from ``amount``.
@@ -293,6 +477,22 @@ def test_a_batchs_amount_is_cumulative_not_remaining():
     total = amount_to_ttl(32954342400, LIVE_PRICE)
     assert total / 86400 == pytest.approx(27.78, rel=1e-3)  # NOT the 24.0 left
     assert total - age_secs == pytest.approx(2073723, rel=1e-3)  # == batchTTL
+
+
+def test_amount_is_not_a_reliable_ledger_of_topups():
+    """Second live finding: /stamps reports the local issuer's BatchAmount,
+    which bee's HandleTopUp increments in memory without persisting. Hours
+    after two confirmed topups it had reverted to the creation value
+    (32954342400) while batchTTL still showed both (40.1 days) — so a
+    topup must never be confirmed by watching `amount` alone.
+    """
+    reverted = dict(LIVE_BATCH, amount="32954342400", batchTTL=3466143)
+    info = run(StampManager(RenewClient(reverted)).get_batch("c9" * 32))
+    assert info.amount == 32954342400  # as if never topped up
+    assert info.ttl == 3466143  # but ~40.1 days remain, from two topups
+    # the amount-derived lifetime is now far SHORTER than the real TTL,
+    # which is exactly why it cannot be used as a source of truth
+    assert amount_to_ttl(info.amount, LIVE_PRICE) < info.ttl
 
 
 def test_conversions_reject_a_nonsensical_price():
@@ -334,6 +534,35 @@ def test_list_batches_supports_expiry_monitoring():
 
 def test_balance_bzz():
     assert run(StampManager(RenewClient()).balance_bzz()) == pytest.approx(1.3207, rel=1e-4)
+
+
+def test_buckets_reports_the_real_headroom():
+    """GET /stamps/{id}/buckets is the ground truth the summary ratio only
+    approximates — and what a publisher needs before adding to a batch."""
+    from swarmfs.stamps import BucketStats
+
+    api = {
+        "depth": 19, "bucketDepth": 16, "bucketUpperBound": 8,
+        "buckets": [{"bucketID": i, "collisions": load}
+                    for load, n in LIVE_LOADS.items() for i in range(n)],
+    }
+    stats = run(StampManager(RenewClient(buckets=api)).buckets("c9" * 32))
+    assert stats == BucketStats(
+        depth=19, bucket_depth=16, capacity=8, chunks=LIVE_CHUNKS,
+        max_load=4, loads=LIVE_LOADS,
+    )
+    assert stats.headroom == 4  # 8 - the fullest bucket's 4
+    # sizing the next upload against reality rather than against bytes
+    assert stats.risk_for(100) < 0.01
+    assert stats.risk_for(200_000) > 0.9
+    assert stats.risk_for(0) == 0.0
+
+    # a batch whose fullest bucket is at capacity: no headroom, and the next
+    # chunk hashing there is refused (402) — but the batch is not destroyed
+    full = dict(api, depth=18, bucketUpperBound=4)
+    stats = BucketStats.from_api(full)
+    assert stats.headroom == 0 and stats.risk_for(1) > 0
+    assert stats.max_load == stats.capacity
 
 
 # -- plan_topup ------------------------------------------------------------
@@ -436,6 +665,16 @@ def test_topup_waits_for_the_node_to_index_the_chain_event(no_sleep):
     assert info.ttl == 3462314
     # the delta is exactly what was paid for — the additive property
     assert info.amount - 32954342400 == LIVE_TOPUP_AMOUNT
+
+
+def test_topup_is_confirmed_by_ttl_when_amount_does_not_move(no_sleep):
+    """Because `amount` is unreliable local bookkeeping, a TTL jump alone
+    must count as "applied" — otherwise a paid-for topup hangs to timeout."""
+    ttl_only = dict(LIVE_BATCH, batchTTL=2073723 + 21600)  # +6h, amount unchanged
+    client = RenewClient(states=[LIVE_BATCH, LIVE_BATCH, ttl_only])
+    info = run(StampManager(client).topup("c9" * 32, 296779680))
+    assert info.ttl == 2073723 + 21600
+    assert info.amount == 32954342400  # never moved, and that is fine
 
 
 def test_topup_refuses_before_spending_when_the_wallet_is_short():
