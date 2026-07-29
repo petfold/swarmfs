@@ -228,9 +228,13 @@ endpoints already exist.
     a 34% risk for content whose true histogram fit it exactly.
     `StampManager.buckets()` (`GET /stamps/{id}/buckets`, 65536 counters)
     gives the same truth for a batch you already own.
-  - **`MIN_DEPTH` is 17, not 16.** Verified live: `POST /stamps/1/16` is
-    rejected with `{"field": "depth", "error": "want min:17"}`. (swarm-bee's
-    `MIN_DEPTH` constant says 16, which the node refuses.)
+  - **The shallowest sellable depth is 17.** Verified live: `POST /stamps/1/16`
+    is rejected with `{"field": "depth", "error": "want min:17"}`. Careful with
+    the name across libraries: swarm-bee/bee-js call the *bucket depth*
+    `MIN_DEPTH` (16) and require `depth > MIN_DEPTH` — the same rule, stated
+    the other way round. A first draft of this note called their constant a
+    bug; it is not, and the mistaken claim nearly became a public issue on
+    their tracker. Read the enforcement, not the constant.
   - **Re-stamping a chunk already stamped by the same batch is free.**
     `stamper.Stamp` looks up `StampItem{BatchID, chunkAddress}` and, when it
     exists, refreshes the timestamp and reuses the stored batch index without

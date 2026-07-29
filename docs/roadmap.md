@@ -156,8 +156,10 @@ feed before consulting the listing cache.
       top up) instead of reading like a dead stamp.
       *Findings pinned by tests:* encryption raises the chunk count by up to **1.7×** at
       PARANOID, not the ~1% claimed earlier (that came from misreading which table
-      `maxParity` uses); `MIN_DEPTH` is **17**, verified by the node rejecting depth 16
-      (`want min:17`) — swarm-bee's constant says 16; a bucket-full batch is **not**
+      `maxParity` uses); the shallowest sellable depth is **17**, verified by the node
+      rejecting depth 16 (`want min:17`) — note swarm-bee/bee-js name the *bucket
+      depth* `MIN_DEPTH` (16) and require `depth > MIN_DEPTH`, which is the same rule
+      inverted, not a disagreement; a bucket-full batch is **not**
       destroyed and dilution reopens it because the counters are preserved; and
       re-stamping an address the same batch already stamped costs no bucket slot
       (`stamper.Stamp` reuses the stored index, stamper.go:47-58).

@@ -47,10 +47,14 @@ CHUNK_SIZE = 4096
 BUCKET_DEPTH = 16  # bee: pkg/postage/stamp.go — BucketDepth is a constant
 BUCKETS = 1 << BUCKET_DEPTH
 MIN_DEPTH = BUCKET_DEPTH + 1
-"""Shallowest batch bee will sell. Verified live against Bee 2.8.1:
-``POST /stamps/1/16`` is rejected at parameter validation with
-``{"field": "depth", "error": "want min:17"}``. (swarm-bee's ``MIN_DEPTH``
-says 16, which the node does not accept.)"""
+"""Shallowest batch bee will sell — a depth must exceed the bucket depth,
+so 17. Verified live against Bee 2.8.1: ``POST /stamps/1/16`` is rejected
+at parameter validation with ``{"field": "depth", "error": "want min:17"}``.
+
+(Name collision worth knowing: swarm-bee/bee-js call the *bucket depth*
+``MIN_DEPTH`` — 16 — and require ``depth > MIN_DEPTH``, which is the same
+rule stated the other way round. Here the constant is the smallest valid
+depth itself.)"""
 DEFAULT_RISK = 0.01
 """Default bucket-overflow risk :func:`suggest_depth` will accept.
 
