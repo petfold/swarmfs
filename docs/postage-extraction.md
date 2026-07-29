@@ -25,14 +25,17 @@ needs stamps wants a filesystem. Concretely:
   erasure tables, sizing, arithmetic, dataclasses, semantics and recovery
   messages. That half is the part worth having exactly once.
 
-## Decision triggers
+## Decision trigger (decided 2026-07-29)
 
-Extract when *either* holds:
+**Silence means we do it ourselves.** bee-py#3 was filed 2026-07-29; #1 (2026-07-19)
+and #2 (2026-07-20) are also unanswered and the last push there was 2026-05-20.
+Peter's call: give it a chance to get a reply, and absent a positive one, prefer
+our own repos rather than waiting on an upstream that may not be maintained. A
+second downstream consumer is no longer required to justify it — recordstore's
+private `swarmfs._client` import already is one.
 
-1. bee-py#3 comes back "not maintained" / no reply by a date you pick, **and**
-2. a second project needs the payment layer without wanting a filesystem — ucomm
-   (mutable stamps for GSOC) is the nearest candidate; recordstore already
-   qualifies but works today via the private import.
+So: a **yes** on bee-py#3 → contribute there and skip this document. Anything
+else → execute the plan below.
 
 Until then the seam is kept clean and nothing is published: `stamps.py` imports
 only stdlib + `._client` + `.exceptions`, and the async `SwarmClient` is itself
