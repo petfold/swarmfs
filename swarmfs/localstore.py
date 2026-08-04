@@ -129,7 +129,20 @@ class LocalStore:
                  min_free_bytes: Optional[int] = None,
                  min_evict_ttl: float = DEFAULT_MIN_EVICT_TTL,
                  fetcher: Optional[Callable[[str], bytes]] = None,
-                 verify_fetch: bool = True):
+                 verify_fetch: bool = True,
+                 durability: str = "commit"):
+        #: fsync policy — "commit" (default): blobs are written without
+        #: fsync and `commit_root` flushes the listed blobs (and their
+        #: directories) in one barrier before the journal event, so a
+        #: many-small-blob commit pays one batch of fsyncs instead of one
+        #: per put; "blob": every put fsyncs immediately (paranoid).
+        #: Either way the journal event only ever follows the barrier —
+        #: "committed" always means durable on local disk.
+        if durability not in ("commit", "blob"):
+            raise ValueError('durability must be "commit" or "blob"')
+        self.durability = durability
+        self._session_written: Set[str] = set()  # written this session
+        self._session_synced: Set[str] = set()   # …and fsynced
         #: Optional network heal: called with a ref when `get` finds the blob
         #: evicted; must return the bytes (a Syncer wires this to its remote).
         self.fetcher = fetcher
@@ -366,9 +379,54 @@ class LocalStore:
         with open(tmp, "wb") as f:
             f.write(data)
             f.flush()
-            os.fsync(f.fileno())
+            if self.durability == "blob":
+                os.fsync(f.fileno())
         os.rename(tmp, path)
         self._local[ref] = len(data)
+        self._session_written.add(ref)
+        if self.durability == "blob":
+            self._session_synced.add(ref)
+
+    def _sync_blobs(self, refs: List[str]) -> None:
+        """The commit-boundary barrier: make the listed blob files (and the
+        directory entries that name them) durable before the journal event
+        claims them. One batch of fsyncs per commit, not one per put."""
+        dirs = set()
+        for ref in refs:
+            if ref in self._session_synced:
+                continue
+            path = self._blob_path(ref)
+            if ref not in self._session_written and \
+                    ref not in self._blob_roots:
+                # A pre-session orphan (a put from a session that crashed
+                # before any commit): its file may be torn — an unflushed
+                # write followed by the rename can survive a crash as a
+                # correctly named file with garbage content. Verify before
+                # this commit claims it durable; on mismatch drop it so
+                # the caller can re-put.
+                with open(path, "rb") as f:
+                    data = f.read()
+                if self._address(data) != ref:
+                    os.unlink(path)
+                    self._local.pop(ref, None)
+                    raise BlobVerificationFailed(
+                        f"blob {ref[:16]}… on disk does not hash to its "
+                        "name (torn write from a crashed session?); the "
+                        "file was dropped — re-put the data and retry the "
+                        "commit")
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            dirs.add(os.path.dirname(path))
+            self._session_synced.add(ref)
+        for d in dirs | ({self._blob_dir} if dirs else set()):
+            fd = os.open(d, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
 
     def get(self, ref: str) -> bytes:
         path = self._blob_path(ref)
@@ -442,6 +500,7 @@ class LocalStore:
                 raise ValueError(
                     f"cannot commit {root[:8]}…: {len(missing)} listed "
                     f"blob(s) not in the store (first: {missing[0][:16]}…)")
+            self._sync_blobs(blobs)  # durable BEFORE the event claims them
             self._append({
                 "ev": "committed", "root": root, "parent": parent,
                 "blobs": blobs, "structure": sorted(structure),

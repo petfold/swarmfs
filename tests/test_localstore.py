@@ -402,3 +402,39 @@ def test_memory_cache_get_many_mixed(tmp_path):
     out = cache.get_many([r1, r2])
     assert out == {r1: b"a" * 10, r2: b"b" * 10}
     assert inner.gets == 1
+
+
+# -- durability policy -------------------------------------------------------------
+
+
+def test_commit_durability_reverifies_crashed_orphan(tmp_path):
+    """A pre-session orphan with torn content must not be claimed durable:
+    the commit that lists it verifies, drops the bad file, and asks for a
+    re-put."""
+    from swarmfs.localstore import BlobVerificationFailed
+
+    s = make_store(tmp_path)
+    ref = s.put(blob(1))
+    path = tmp_path / "store" / "blobs" / ref[:2] / ref
+    s.close()
+    path.write_bytes(b"garbage from a torn write")  # simulate the crash
+
+    with make_store(tmp_path) as s2:
+        assert s2.has_local(ref)  # scan sees the file...
+        with pytest.raises(BlobVerificationFailed, match="re-put"):
+            s2.commit_root(ref, None, [ref])
+        assert not s2.has_local(ref)      # ...but the bad file is dropped
+        assert s2.put(blob(1)) == ref     # re-put heals
+        s2.commit_root(ref, None, [ref])  # and the commit lands
+
+
+def test_blob_durability_mode_unchanged(tmp_path):
+    with make_store(tmp_path, durability="blob") as s:
+        a = s.put(blob(1))
+        s.commit_root(a, None, [a])
+        assert s.get(a) == blob(1)
+
+
+def test_unknown_durability_rejected(tmp_path):
+    with pytest.raises(ValueError, match="durability"):
+        make_store(tmp_path, durability="yolo")
