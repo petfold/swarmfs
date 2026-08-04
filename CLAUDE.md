@@ -361,14 +361,14 @@ gateway selection/fallback (see next section).
 
 ## Packaging & CI (decided, implemented)
 
-- **Version**: `0.5.0` (the local-first store: `swarmfs.localstore` +
-  `swarmfs.localsync`, L0–L2 of `docs/localstore-design.md` — journal
-  format, budget/pinning/eviction, push worker with p2p-native
-  confirmation, durability knob; client tier gained `stewardship_get` and
-  `bytes_post(deferred=)`. recordstore 0.17.0's `[local]` extra depends on
-  exactly this release). Earlier: `0.4.0` derived batch sizing + the
-  topup-detection fix; `0.3.0` the stamp lifecycle; `0.2.0` local
-  addressing; `0.1.0` the first real one. Live in both `pyproject.toml` and `swarmfs/__init__.py` —
+- **Version**: `0.6.0` (localstore retention primitives: `rebase_root`
+  — the app-assisted squash, with the `rebased` journal event now in the
+  format spec — plus `gc_orphans`, `has_root`/`latest_root`, and the
+  `durability=` commit-boundary fsync batching. recordstore 0.18.0's
+  `squash_history` depends on exactly this release). Earlier: `0.5.0`
+  the local-first store (localstore + localsync, L0–L2); `0.4.0` derived
+  batch sizing + the topup-detection fix; `0.3.0` the stamp lifecycle;
+  `0.2.0` local addressing; `0.1.0` the first real one. Live in both `pyproject.toml` and `swarmfs/__init__.py` —
   keep these two in sync on every bump. `.devN`/pre-release suffixes are
   excluded from `pip install` by default; a plain version with the "Alpha"
   classifier is the intended shape — the classifier signals maturity, the
