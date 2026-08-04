@@ -290,10 +290,16 @@ nothing evicts against a dying batch.
 - [ ] **L3 — swarmfs write-path adoption**: commit-engine spool →
       localstore; transactional commits become local-first; bzzf feed
       updates ride the ladder.
-- [ ] **L4 — working-set controls**: named pins, `fetch` warm-up,
-      only-on-Swarm accounting in `status()`, history retention policy,
-      `scrub()` (bitrot detection; corrupt evictable blobs heal by
-      verified re-fetch, corrupt pinned blobs fail loudly).
+- [ ] **L4 — working-set controls** — mostly landed 2026-08-04 via the
+      recordstore R2/R3 work: named pins and `gc_orphans` live here
+      (`pin`/`unpin` since L0; `rebase_root` + `gc_orphans` for
+      app-assisted retention), prefix-pinning/`fetch` warm-ups live in
+      recordstore (the app owns reachability), and
+      `only_on_swarm_count` is in `status()`. Still owed here:
+      - [ ] `scrub()` (bitrot detection; corrupt evictable blobs heal by
+            verified re-fetch, corrupt pinned blobs fail loudly).
+      - [ ] batch-TTL prominence in `status()` ("N blobs only on Swarm,
+            batch B expires in D days").
 
 ## Later / opportunistic
 
