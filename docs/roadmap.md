@@ -225,13 +225,19 @@ nothing evicts against a dying batch.
          everywhere; format v1 is single-writer POSIX by scope.
 - [ ] **L1 — push worker + durability ladder**: deferred/direct upload,
       tag/stewardship confirmation (validate mechanics live), TTL recording,
-      `sync()`, `status()`.
+      `sync()`, `status()`. Verification requirements (design doc,
+      *Verification and trust*): verified re-fetch of evicted blobs, the
+      push ref-equality assertion (erasure-coding drift tripwire), and
+      sampled retrieve-and-verify behind the network-confirmed rung —
+      node claims alone promote no further than on-node.
 - [ ] **L2 — recordstore adoption** (tracked in recordstore's ROADMAP).
 - [ ] **L3 — swarmfs write-path adoption**: commit-engine spool →
       localstore; transactional commits become local-first; bzzf feed
       updates ride the ladder.
 - [ ] **L4 — working-set controls**: named pins, `fetch` warm-up,
-      only-on-Swarm accounting in `status()`, history retention policy.
+      only-on-Swarm accounting in `status()`, history retention policy,
+      `scrub()` (bitrot detection; corrupt evictable blobs heal by
+      verified re-fetch, corrupt pinned blobs fail loudly).
 
 ## Later / opportunistic
 

@@ -87,7 +87,9 @@ staged → committed (local disk) → on-node (push accepted) → network-confir
   check), or by using direct upload (`Swarm-Deferred-Upload: false`), whose
   success already means network. *(Exact confirmation mechanics to be
   verified against the current Bee API during implementation; the ladder does
-  not depend on which one wins.)*
+  not depend on which one wins.)* Note that tags counts and stewardship
+  responses are *the node's claim*; the cryptographically sound check is
+  retrieve-and-verify — see *Verification and trust* for the policy.
 
 **Only `network-confirmed` flips blobs from pinned to evictable.** That is
 the single coupling between the ladder and the eviction engine, and it
@@ -216,6 +218,56 @@ explicit-pins is debuggable; anything smarter turns cache behavior into
 weather, and its failure mode — surprise network reads — is exactly what
 local-first exists to eliminate. Explicit beats clever.
 
+## Verification and trust
+
+The invariant quietly rests on a cryptographic property: a ref *is* a hash,
+so possession of the ref is the ability to verify the bytes no matter who
+serves them. That is why "evict it, Swarm holds it" is sound against an
+untrusted open network. Four requirements and one deliberate non-use keep
+that story honest:
+
+1. **Verified re-fetch (L1 requirement).** A lazy re-fetch of an evicted
+   blob MUST be verified against its ref before being served — reuse the
+   verifying joiner (`swarmfs/join.py`) or the whole-blob check
+   (`content_address(data) == ref`). Without this, the trust model silently
+   degrades from "trust nothing but your own disk" to "trust whatever
+   served the re-fetch."
+2. **Push ref-equality assertion (L1 requirement).** The reference the node
+   returns for an upload MUST equal the locally computed one, or the push
+   fails loudly. This is a free end-to-end tripwire for the known
+   address-space fork: a node uploading with erasure coding on returns a
+   *different* reference for the same bytes (parity changes every
+   intermediate chunk), and `swarm` addressing is pinned to redundancy off.
+3. **Confirmation is tiered by trust (L1 policy).** Node claims (tags,
+   stewardship responses) promote a root cheaply to *on-node*;
+   *network-confirmed* — the rung that unlocks eviction — requires
+   retrieve-and-verify through the network path for at least a random
+   sample of the root's blobs, with the sampling rate a paranoia knob.
+   Since confirmation is precisely what permits deleting the local copy,
+   the verification budget is spent exactly where the invariant lives.
+   (Whether stewardship's check already exercises the network path rather
+   than the node's own store is one of the L1 questions to settle live.)
+4. **Local scrub (L4).** The format already mandates that a blob file not
+   hashing to its name is corrupt and MUST be treated as absent — a
+   `scrub()` verb (git-fsck style) makes that real against bitrot:
+   re-hash local blobs; a corrupt *evictable* blob demotes to absent and
+   heals by verified re-fetch, a corrupt *pinned* blob is a loud integrity
+   error (the journal still under-claims correctly either way).
+
+**Non-use, recorded:** the journal is not hash-chained or signed. It is
+local, single-writer, on the owner's own disk — an attacker who can edit it
+can delete the blob files directly, and torn writes are handled by the
+truncation rule. Tamper-evidence becomes relevant only if journals are ever
+shared between machines; at that point Swarm's *signed feed history* is the
+right authenticated lineage, not a signed local file.
+
+For downstream readers, this layer completes an existing chain of custody:
+a signed SOC feed update (verified by swarmfs) names a root; recordstore's
+`prove()`/`verify_proof()` hash-chains any inclusion/absence claim down
+from that root with no store access — and structure-resident/values-remote
+mode keeps exactly the blobs needed to *generate* proofs local, so even a
+store far larger than the disk can mint proofs offline.
+
 ## The boundary: shared vs. app-specific
 
 **In the layer**: blob get/put; the local mirror with budget, soft limit, and
@@ -263,9 +315,11 @@ mounts) can share a ref-journal utility.
   byte; the store recovers under-claiming).*
 - **L1 — Push worker + durability ladder.** Deferred/direct upload, tag or
   stewardship confirmation (whichever the live tests validate), TTL
-  recording, `sync()` barrier, `status()`. *Acceptance: kill the process at
-  any point during push; recovery re-pushes idempotently; live test against
-  a real Bee.*
+  recording, `sync()` barrier, `status()`. Verification requirements:
+  verified re-fetch, the push ref-equality assertion, and sampled
+  retrieve-and-verify as the network-confirmed check (see *Verification and
+  trust*). *Acceptance: kill the process at any point during push; recovery
+  re-pushes idempotently; live test against a real Bee.*
 - **L2 — recordstore adoption.** See recordstore's ROADMAP (Local-first
   track): its local/Bee stores become adapters over `localstore`; the journal
   becomes its reflog; push/pull verbs on `RecordStore`.
@@ -273,7 +327,8 @@ mounts) can share a ref-journal utility.
   `localstore`; transactional commits become local-first with background
   push; `bzzf` feed update rides the same ladder.
 - **L4 — Working-set controls.** Named pins, `fetch`, only-on-Swarm
-  accounting surfaced in `status()`, retention policy.
+  accounting surfaced in `status()`, retention policy, and `scrub()`
+  (local bitrot detection with verified-re-fetch healing).
 
 Each phase is independently useful; L0+L1 already give any consumer a
 correct local-first store with certainty semantics.
