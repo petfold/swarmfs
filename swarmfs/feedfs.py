@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import time
 
+from fsspec.asyn import sync
+
 from .core import SwarmFileSystem
 from .feeds import FeedError, FeedOps, FeedSigner, owner_bytes, topic_bytes
 
@@ -51,6 +53,12 @@ class SwarmFeedFileSystem(SwarmFileSystem):
         # the ordinary lineage maps (_root_map/_origin) keyed by the feed key
         self._feed_state: dict[str, tuple[int, float]] = {}
         self._feed_identity: dict[str, tuple[bytes, bytes]] = {}  # key -> (owner, topic)
+        # local-first: feed key -> newest committed-but-unpublished root;
+        # published by the confirmed-listener once the network provably
+        # serves it (see _after_commit)
+        self._feed_pending: dict[str, str] = {}
+        if self._local is not None:
+            self._local.add_listener(self._on_ladder_event)
 
     # ----------------------------------------------------------- path model
 
@@ -167,6 +175,18 @@ class SwarmFeedFileSystem(SwarmFileSystem):
     async def _after_commit(self, okey: str, result) -> None:
         if not okey.startswith(_FEED_PREFIX):
             return
+        if self._syncer is not None:
+            # Local-first: publication rides the durability ladder. The
+            # feed must never point readers at content the network cannot
+            # serve yet, so the update waits for network confirmation —
+            # the journal listener below publishes the newest confirmed
+            # head (and a failed publish retries on the next confirmation).
+            self._feed_pending[okey] = result.new_root
+            return
+        await self._publish_feed(okey, result.new_root, result.batch)
+
+    async def _publish_feed(self, okey: str, new_root: str,
+                            stamp: str) -> None:
         owner, topic = self._feed_identity[okey]
         assert self.signer is not None  # enforced at staging time
         # the next index is the max of a fresh lookup (another writer may
@@ -177,6 +197,21 @@ class SwarmFeedFileSystem(SwarmFileSystem):
         local = self._feed_state.get(okey, (0, 0.0))[0]
         next_index = max(looked_up, local)
         await self._feeds.update(
-            self.signer, topic, next_index, result.new_root, stamp=result.batch
+            self.signer, topic, next_index, new_root, stamp=stamp
         )
         self._bump_feed_state(okey, next_index + 1)
+
+    def _on_ladder_event(self, event: dict) -> None:
+        """Journal listener (runs on the syncer's worker thread): each
+        confirmed rung publishes any feed whose pending head the network
+        now provably serves, then records the remote-tracking root."""
+        if event.get("ev") != "confirmed":
+            return
+        for okey, root in list(self._feed_pending.items()):
+            if not self._local.network_confirmed(root):
+                continue
+            stamp = self._syncer.remote.stamp  # resolves lazily; node is up
+            sync(self.loop, self._publish_feed, okey, root, stamp)
+            if self._feed_pending.get(okey) == root:
+                del self._feed_pending[okey]
+            self._local.set_remote_root(okey, root)

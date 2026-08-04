@@ -31,7 +31,7 @@ from fsspec.spec import AbstractBufferedFile
 from fsspec.transaction import Transaction
 from fsspec.utils import stringify_path
 
-from ._client import DEFAULT_API_URL, SwarmClient
+from ._client import DEFAULT_API_URL, SwarmClient, SyncSwarmClient
 from ._listing import ListingBackend, detect_listing_backend
 from .commit import CommitEngine, CommitResult, StagedWrite
 from .stamps import StampManager
@@ -102,6 +102,17 @@ class SwarmFileSystem(AsyncFileSystem):
         its reference). Default: on for gateways, off for your own node.
     client:
         Injection seam for a pre-built ``SwarmClient`` (used by tests).
+    local_store:
+        Local-first mode (docs/localstore-design.md): path to a store
+        directory (or a ready ``LocalStore``). Commits land on local disk
+        instantly — offline is the normal mode, no stamp is needed at
+        commit time — and a background syncer pushes them to Swarm and
+        confirms peer-to-peer; ``fs.sync()`` is the certainty barrier and
+        ``fs.sync_status()`` the ladder view. bzzf feed updates publish
+        only after confirmation. Requires ``redundancy=0`` (erasure
+        coding would fork the node's references from the local BMT
+        address space). Reads still go to the node — local-first covers
+        the write path.
     """
 
     protocol = "bzz"
@@ -120,6 +131,7 @@ class SwarmFileSystem(AsyncFileSystem):
         allow_gateway: bool = False,
         verify: bool | None = None,
         client: SwarmClient | None = None,
+        local_store: str | None = None,
         asynchronous: bool = False,
         loop=None,
         **storage_options,
@@ -143,9 +155,34 @@ class SwarmFileSystem(AsyncFileSystem):
         self._reader = None  # client, or a VerifyingReader over it
         self._setup_done = False
         self._backend: ListingBackend | None = None
-        self._engine = CommitEngine(
-            self.client, StampManager(self.client), pin=pin, redundancy=redundancy
-        )
+        # Local-first mode (L3): commits land in a store directory and a
+        # background syncer pushes/confirms; the network leaves the write
+        # path entirely. See docs/localstore-design.md.
+        self._local = None
+        self._syncer = None
+        if local_store is not None:
+            if redundancy not in (None, 0):
+                raise ValueError(
+                    "local_store requires redundancy=0: erasure coding "
+                    "changes the node's references, forking them from the "
+                    "local store's BMT address space")
+            from .commit import LocalFirstCommitEngine
+            from .localstore import LocalStore
+            from .localsync import BeeRemote, Syncer
+
+            self._local = (local_store if not isinstance(local_store, str)
+                           else LocalStore(local_store, addressing="swarm"))
+            remote = BeeRemote(client=SyncSwarmClient(client=self.client),
+                               stamp=stamp or "auto")
+            self._syncer = Syncer(self._local, remote).start()
+            self._engine = LocalFirstCommitEngine(self._local, self.client)
+            weakref.finalize(self, _stop_local_first,
+                             self._syncer, self._local)
+        else:
+            self._engine = CommitEngine(
+                self.client, StampManager(self.client), pin=pin,
+                redundancy=redundancy
+            )
         # staging, keyed by the *origin* root of each manifest lineage
         self._staged: dict[str, dict[str, StagedWrite]] = {}
         self._staged_rm: dict[str, set[str]] = {}
@@ -154,6 +191,23 @@ class SwarmFileSystem(AsyncFileSystem):
         self._commit_lock = asyncio.Lock()
         self.commit_log: list[CommitResult] = []
         weakref.finalize(self, self._close_client, self.loop, self.client)
+
+    # -- local-first surface (present when local_store= was given) -----------
+
+    def sync(self, timeout: float | None = None) -> None:
+        """Block until every local-first commit is network-confirmed — the
+        certainty barrier ('my data is really out there')."""
+        if self._syncer is None:
+            raise RuntimeError("no local_store configured: writes go "
+                               "straight to the node, nothing to sync")
+        self._syncer.sync(timeout)
+
+    def sync_status(self):
+        """The local-first store's ladder view (swarmfs `StoreStatus`):
+        pinned vs evictable bytes, per-root rungs, batch expiries."""
+        if self._local is None:
+            raise RuntimeError("no local_store configured")
+        return self._local.status()
 
     @staticmethod
     def _close_client(loop, client: SwarmClient) -> None:
@@ -918,3 +972,10 @@ class SwarmFile(AbstractBufferedFile):
 
     def discard(self):
         sync(self.fs.loop, self.fs._unstage_path, self._stripped)
+
+
+def _stop_local_first(syncer, local) -> None:
+    try:
+        syncer.stop()
+    finally:
+        local.close()

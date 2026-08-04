@@ -522,3 +522,51 @@ def test_gc_collects_crashed_session_orphans(tmp_path):
         count, freed = s2.gc_orphans()
         assert count == 1 and freed == 60
         assert not s2.has_local(orphan)
+
+
+# -- scrub + batch expiries (L4) ------------------------------------------------------
+
+
+def test_scrub_clean_store(tmp_path):
+    with make_store(tmp_path) as s:
+        a = s.put(blob("a"))
+        s.commit_root(a, None, [a])
+        assert s.scrub() == {"scanned": 1, "dropped": []}
+
+
+def test_scrub_drops_corrupt_evictable_for_refetch(tmp_path):
+    with make_store(tmp_path) as s:
+        a = s.put(blob("a"))
+        s.commit_root(a, None, [a])
+        s.mark_confirmed(a, ttl=None)                # on Swarm: evictable
+        path = tmp_path / "store" / "blobs" / a[:2] / a
+        path.write_bytes(b"bitrot!")
+        result = s.scrub()
+        assert result["dropped"] == [a]
+        assert not s.has_local(a)                    # heals on next read
+
+
+def test_scrub_raises_on_corrupt_pinned(tmp_path):
+    from swarmfs.localstore import BlobVerificationFailed
+
+    with make_store(tmp_path) as s:
+        a = s.put(blob("a"))
+        s.commit_root(a, None, [a])                  # unpushed: pinned
+        path = tmp_path / "store" / "blobs" / a[:2] / a
+        path.write_bytes(b"bitrot!")
+        with pytest.raises(BlobVerificationFailed, match="nowhere else"):
+            s.scrub()
+
+
+def test_status_surfaces_batch_expiries(tmp_path):
+    import time as _t
+
+    with make_store(tmp_path) as s:
+        a = s.put(blob("a"))
+        s.commit_root(a, None, [a])
+        s.mark_confirmed(a, batch="b1", ttl=1000)
+        b = s.put(blob("b"))
+        s.commit_root(b, a, [b])
+        s.mark_confirmed(b, batch="b1", ttl=500)     # tighter: wins
+        expiry = s.status().batch_expiries["b1"]
+        assert abs(expiry - (_t.time() + 500)) < 5   # the earliest expiry

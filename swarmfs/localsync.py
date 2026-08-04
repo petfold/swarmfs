@@ -90,21 +90,43 @@ class BeeRemote:
                  client: Optional[SyncSwarmClient] = None,
                  min_batch_ttl: int = 86400):
         self.client = client or SyncSwarmClient(api_url)
-        # stamp=None -> read-only remote: no stamp resolution (a gateway
-        # has no /stamps), fetch/stewardship only. This is the *witness*
-        # shape — see Syncer(witness=…) — and needs no trust: every fetched
-        # byte is hashed against its ref by the caller.
-        self.stamp = None if stamp is None else _run_sync(
-            self.client.loop,
-            StampManager(self.client._client, min_batch_ttl).resolve, stamp)
+        self.min_batch_ttl = min_batch_ttl
+        # stamp=None -> read-only remote: no stamp, fetch/stewardship only.
+        # This is the *witness* shape — see Syncer(witness=…) — and needs
+        # no trust: every fetched byte is hashed against its ref by the
+        # caller. "auto" resolves LAZILY, on first use: a local-first
+        # store must be constructible offline, and postage is the push's
+        # concern, not the constructor's (a resolution failure surfaces
+        # in the worker's backoff/last_error, retried when the node is
+        # back). An explicit batch id is used as-is — the node rejects a
+        # bad one loudly at push time.
+        self._stamp_arg = stamp
+        self._stamp_resolved = None if stamp == "auto" else stamp
+
+    @property
+    def stamp(self) -> Optional[str]:
+        if self._stamp_arg is None:
+            return None
+        if self._stamp_resolved is None:
+            self._stamp_resolved = _run_sync(
+                self.client.loop,
+                StampManager(self.client._client,
+                             self.min_batch_ttl).resolve, self._stamp_arg)
+        return self._stamp_resolved
+
+    @stamp.setter
+    def stamp(self, value: Optional[str]) -> None:
+        self._stamp_arg = value
+        self._stamp_resolved = None if value == "auto" else value
 
     def push_blob(self, ref: str, data: bytes,
                   deferred: bool = True) -> None:
-        if self.stamp is None:
+        stamp = self.stamp
+        if stamp is None:
             raise RuntimeError(
                 "this BeeRemote is read-only (stamp=None) — a witness "
                 "verifies, it does not upload")
-        got = self.client.bytes_post(data, self.stamp, deferred=deferred)
+        got = self.client.bytes_post(data, stamp, deferred=deferred)
         if got != ref:
             raise BlobVerificationFailed(
                 f"the node returned reference {got[:16]}… for a blob "

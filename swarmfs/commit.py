@@ -130,5 +130,104 @@ class CommitEngine:
         )
 
 
+class LocalFirstCommitEngine(CommitEngine):
+    """The commit engine over a local-first store (L3): staged files and
+    manifest nodes land on local disk — BMT-addressed by the splitter, so
+    the refs equal what the node would return with erasure coding off —
+    and the new root is journaled with its exact new-blob list (manifest
+    nodes classified as eviction-priority structure). The attached Syncer
+    pushes and confirms in the background; `commit()` itself never touches
+    the network for writes and needs **no stamp** — postage is the push's
+    concern, which is why offline commits are the normal mode.
+
+    Reads during the manifest patch are local-first: journal-known refs
+    come from disk (healing by verified re-fetch if evicted), refs from a
+    foreign lineage (a manifest that was never local, e.g. opening
+    ``bzz://<remote-ref>`` and writing into it) fall back to the node
+    transiently — deliberately not persisted, so foreign parents don't
+    accumulate as forever-pinned orphans.
+
+    Erasure coding must stay off for this store's uploads (parity forks
+    the address space — the push's ref-equality assertion would trip), so
+    the constructor refuses a redundancy setting.
+    """
+
+    def __init__(self, local, client: SwarmClient, concurrency: int = 8):
+        self.local = local  # swarmfs.localstore.LocalStore, addressing="swarm"
+        self.client = client
+        self.concurrency = concurrency
+        if getattr(local, "addressing", "swarm") != "swarm":
+            raise ValueError(
+                'a local-first commit engine needs addressing="swarm" '
+                "(its refs must equal the node's)")
+
+    async def commit(
+        self,
+        root: str | None,
+        writes: dict[str, StagedWrite],
+        removes: Iterable[str],
+        stamp: str | None = None,  # unused: postage belongs to the push
+    ) -> CommitResult:
+        removes = sorted(removes)
+        if not writes and not removes:
+            raise ValueError("nothing staged to commit")
+        sem = asyncio.Semaphore(self.concurrency)
+
+        async def put_local(data: bytes) -> str:
+            async with sem:
+                return await asyncio.to_thread(self.local.put, data)
+
+        async def upload(path: str, sw: StagedWrite) -> tuple[str, str]:
+            return path, await put_local(sw.payload())
+
+        uploaded = dict(
+            await asyncio.gather(*(upload(p, sw) for p, sw in writes.items()))
+        )
+
+        async def load(ref: bytes) -> bytes:
+            hexref = ref.hex()
+            try:
+                return await asyncio.to_thread(self.local.get, hexref)
+            except KeyError:
+                return await self.client.bytes_get(hexref)  # foreign lineage
+
+        if root is not None:
+            node = unmarshal(await load(bytes.fromhex(root)))
+        else:
+            node = Node()
+
+        for path in removes:
+            await remove(node, _b(path), load)
+        for path, sw in writes.items():
+            await add(node, _b(path), bytes.fromhex(uploaded[path]),
+                      sw.metadata, load)
+
+        node_refs: list[str] = []
+
+        async def saver(data: bytes) -> bytes:
+            ref = await put_local(data)
+            node_refs.append(ref)
+            return bytes.fromhex(ref)
+
+        new_root = (await save(node, saver)).hex()
+        for sw in writes.values():
+            sw.close()
+
+        if new_root != root and not self.local.has_root(new_root):
+            parent = root if (root is not None
+                              and self.local.has_root(root)) else None
+            blobs = set(uploaded.values()) | set(node_refs)
+            await asyncio.to_thread(
+                self.local.commit_root, new_root, parent, sorted(blobs),
+                sorted(set(node_refs)))
+        return CommitResult(
+            old_root=root,
+            new_root=new_root,
+            written=uploaded,
+            removed=removes,
+            batch="",  # no stamp spent: the push worker owns postage
+        )
+
+
 def _b(path: str) -> bytes:
     return path.encode("utf-8", "surrogateescape")

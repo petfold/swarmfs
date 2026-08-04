@@ -106,6 +106,10 @@ class StoreStatus:
     roots: Dict[str, str]          # root -> rung
     remote_roots: Dict[str, str]   # remote name -> root
     pins: Dict[str, int]           # pin name -> ref count
+    #: batch id -> earliest estimated expiry (unix ts) among the roots it
+    #: covers. THE number to watch once local is partial: expired batch +
+    #: evicted blob = permanent loss, so surface it prominently.
+    batch_expiries: Dict[str, float] = field(default_factory=dict)
 
 
 class LocalStore:
@@ -843,7 +847,58 @@ class LocalStore:
                 roots={r: s.rung for r, s in self._roots.items()},
                 remote_roots=dict(self._remote_roots),
                 pins={n: len(refs) for n, refs in self._pins.items()},
+                batch_expiries=self._batch_expiries(),
             )
+
+    def _batch_expiries(self) -> Dict[str, float]:
+        out: Dict[str, float] = {}
+        for state in self._roots.values():
+            if (state.batch and state.ttl is not None
+                    and state.confirmed_ts is not None):
+                expiry = state.confirmed_ts + state.ttl
+                if state.batch not in out or expiry < out[state.batch]:
+                    out[state.batch] = expiry
+        return out
+
+    def scrub(self) -> dict:
+        """Bitrot check: re-hash every local blob against its name (the
+        format mandates a mismatching file be treated as absent — this
+        makes that real). A corrupt *evictable* blob is dropped and heals
+        by verified re-fetch on its next read; a corrupt *pinned* blob is
+        the only copy going bad — the scan completes, then raises
+        `BlobVerificationFailed` naming every such ref. On-demand and
+        O(store): run it from a cron, never a hot path. Returns
+        ``{"scanned": n, "dropped": [refs]}`` when all is well."""
+        with self._mutex:
+            refs = list(self._local)
+        dropped, corrupt_pinned = [], []
+        now = time.time()
+        for ref in refs:
+            try:
+                with open(self._blob_path(ref), "rb") as f:
+                    data = f.read()
+            except FileNotFoundError:
+                continue  # evicted mid-scan
+            if self._address(data) == ref:
+                continue
+            with self._mutex:
+                if self._evictable(ref, now):
+                    try:
+                        os.unlink(self._blob_path(ref))
+                    except FileNotFoundError:
+                        pass
+                    self._local.pop(ref, None)
+                    dropped.append(ref)
+                else:
+                    corrupt_pinned.append(ref)
+        if corrupt_pinned:
+            shown = ", ".join(r[:16] + "…" for r in corrupt_pinned[:5])
+            raise BlobVerificationFailed(
+                f"{len(corrupt_pinned)} pinned blob(s) are corrupt on disk "
+                f"and exist nowhere else ({shown}) — restore from a backup "
+                "or accept the loss; evictable corruption was healed "
+                f"({len(dropped)} dropped for re-fetch)")
+        return {"scanned": len(refs), "dropped": dropped}
 
     # -- lifecycle ----------------------------------------------------------------
 

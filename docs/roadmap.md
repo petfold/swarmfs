@@ -287,19 +287,41 @@ nothing evicts against a dying batch.
       pointer file beside the journal — returning to a prior state
       re-uses its root, which the append-only journal refuses to
       re-record.
-- [ ] **L3 — swarmfs write-path adoption**: commit-engine spool →
-      localstore; transactional commits become local-first; bzzf feed
-      updates ride the ladder.
+- [x] **L3 — swarmfs write-path adoption** (2026-08-04).
+      `LocalFirstCommitEngine` (commit.py): staged files and manifest
+      nodes land on local disk BMT-addressed and journaled per commit
+      (nodes = structure); **no stamp at commit time** — postage belongs
+      to the push, which also meant `BeeRemote` now resolves `"auto"`
+      lazily so the fs constructs offline. Wired as
+      `SwarmFileSystem(local_store=...)` (requires `redundancy=0` —
+      erasure coding would fork the address space; the constructor
+      refuses rather than silently overriding) with `fs.sync()` /
+      `fs.sync_status()`. bzzf rides the ladder: `_after_commit` defers
+      to a journal listener that publishes the feed only once the root
+      is network-confirmed, then records the remote-tracking root.
+      *Findings:* foreign-lineage parents (opening `bzz://<remote-ref>`
+      and writing into it) load through the node **transiently, not
+      persisted** — persisting them would create forever-pinned orphans,
+      and their absence from the push is correct because a foreign ref
+      is by definition already network-resident; and mantaray shows the
+      same canonical-revisit behavior as recordstore's trie (removing a
+      file can reproduce an earlier root byte-for-byte — empty-node
+      pruning — which the journal rightly refuses to re-record).
+      Read path deliberately unchanged (reads go to the node; fsspec
+      caching or a future L5 can revisit).
 - [ ] **L4 — working-set controls** — mostly landed 2026-08-04 via the
       recordstore R2/R3 work: named pins and `gc_orphans` live here
       (`pin`/`unpin` since L0; `rebase_root` + `gc_orphans` for
       app-assisted retention), prefix-pinning/`fetch` warm-ups live in
       recordstore (the app owns reachability), and
-      `only_on_swarm_count` is in `status()`. Still owed here:
-      - [ ] `scrub()` (bitrot detection; corrupt evictable blobs heal by
-            verified re-fetch, corrupt pinned blobs fail loudly).
-      - [ ] batch-TTL prominence in `status()` ("N blobs only on Swarm,
-            batch B expires in D days").
+      `only_on_swarm_count` is in `status()`. Completed 2026-08-04:
+      - [x] `scrub()` — bitrot check over every local blob; corrupt
+            evictable blobs are dropped (heal by verified re-fetch on
+            next read), corrupt pinned blobs complete the scan then
+            raise, named — the only copy is bad.
+      - [x] `StoreStatus.batch_expiries` — batch id → earliest estimated
+            expiry among the roots it covers; THE number to watch once
+            local is partial (expired batch + evicted blob = loss).
 
 ## Later / opportunistic
 
