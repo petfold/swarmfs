@@ -361,7 +361,13 @@ gateway selection/fallback (see next section).
 
 ## Packaging & CI (decided, implemented)
 
-- **Version**: `0.6.0` (localstore retention primitives: `rebase_root`
+- **Version**: `0.7.0` (L3+L4: the fs's own write path goes local-first —
+  `SwarmFileSystem(local_store=..., redundancy=0)`, `LocalFirstCommitEngine`,
+  local-first reads for known refs (offline read-your-writes), bzzf
+  publish-after-confirmation, `scrub()`, `StoreStatus.batch_expiries` — plus
+  the fsspec<2024.3.0 transaction-exit crash fix, with old-fsspec
+  compatibility now enforced by a CI job pinning `fsspec==2024.2.0`).
+  Earlier: `0.6.0` (localstore retention primitives: `rebase_root`
   — the app-assisted squash, with the `rebased` journal event now in the
   format spec — plus `gc_orphans`, `has_root`/`latest_root`, and the
   `durability=` commit-boundary fsync batching. recordstore 0.18.0's

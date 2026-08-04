@@ -22,6 +22,26 @@ jobs:
       # live-node tests skip themselves — this runs the offline suite only.
       - run: pytest
 
+  # The declared floor is fsspec>=2023.6.0, and Debian/Ubuntu LTS machines
+  # really do run 2024-era fsspec (dist-packages freeze at OS release, and
+  # pip never upgrades a dependency that already satisfies the floor) — so
+  # old-fsspec compatibility must be enforced, not remembered.
+  # Transaction.__exit__ gained its `if self.fs:` guard in 2024.3.0; this
+  # pins the newest release BEFORE it, the exact vintage that crashed
+  # every transaction exit until the complete() fix. Minimal deps only:
+  # current dask/zarr require newer fsspec, and the pandas/dask/zarr tests
+  # importorskip themselves away — the subject here is swarmfs vs fsspec.
+  test-oldest-fsspec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -e . pytest "eth-keys>=0.4"
+          "eth-hash[pycryptodome]>=0.5" "fsspec==2024.2.0"
+      - run: pytest
+
   package:
     runs-on: ubuntu-latest
     steps:
