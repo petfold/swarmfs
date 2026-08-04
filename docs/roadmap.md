@@ -199,9 +199,30 @@ as the blocking certainty barrier. Byte budget with a soft limit for pinned
 data; two-class TTL-aware LRU eviction so structure outlives values and
 nothing evicts against a dying batch.
 
-- [ ] **L0 — format spec + core store** (no network): blob dir, journal,
-      index, budget, pinning, eviction, bounded memory-cache wrapper.
-      Property-test the invariant under crash injection.
+- [x] **L0 — format spec + core store** (no network): the normative format
+      (`docs/localstore-format.md`), `swarmfs/localstore.py` (`LocalStore` +
+      `MemoryCacheStore`), budget with soft limit, pinning, two-class
+      TTL-aware eviction. Invariant property-tested under crash injection:
+      the journal truncated at **every** byte offset recovers under-claiming,
+      and a 200-step random workload never loses an unconfirmed blob.
+      *Findings pinned while implementing (all in tests or the spec):*
+      1. A torn final journal line must be **truncated on open**, not just
+         skipped — otherwise the next append concatenates onto the fragment
+         and turns a recoverable torn line into mid-file corruption. A valid
+         JSON line missing its `\n` is torn too. Now normative in the spec.
+      2. A blob shared by a confirmed and an unconfirmed root **is
+         evictable** (confirmation means Swarm holds it; the later push
+         needn't re-upload) — the design doc's first pinned-set definition
+         quietly contradicted this; the spec defines evictable first and
+         pinned as its complement.
+      3. Structure-vs-payload classification happens at `commit_root`, not
+         `put` — only the journal survives reopening, so a put-time hint was
+         a false affordance (design doc updated).
+      4. `addressing="swarm"` needs keccak (the `feeds` extra) via the BMT
+         splitter; the error now says so and names the `sha256` fallback.
+      5. `fcntl` is POSIX-only, so localstore is deliberately **not**
+         exported from the package root — `import swarmfs` keeps working
+         everywhere; format v1 is single-writer POSIX by scope.
 - [ ] **L1 — push worker + durability ladder**: deferred/direct upload,
       tag/stewardship confirmation (validate mechanics live), TTL recording,
       `sync()`, `status()`.

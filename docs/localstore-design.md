@@ -174,8 +174,9 @@ which frees space.
 
 **Eviction** is LRU over evictable blobs, refined two ways:
 
-- **Priority classes, not content inspection.** Applications pass an optional
-  hint at `put` time (e.g. `structure` vs `data`). Structure blobs — trie
+- **Priority classes, not content inspection.** Applications declare, per
+  commit, which of its new blobs are structure vs. payload (recorded in the
+  `committed` journal event, so the classification survives reopening). Structure blobs — trie
   nodes, manifest nodes — are small, touched on every operation, and
   disproportionately valuable per byte: with structure resident and values
   remote, recordstore can diff or three-way-merge million-key roots locally
