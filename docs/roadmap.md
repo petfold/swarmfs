@@ -231,7 +231,13 @@ nothing evicts against a dying batch.
       sampled retrieve-and-verify behind the network-confirmed rung —
       node claims alone promote no further than on-node. The worker's
       concurrency/rate is a knob (it shares the link with foreground
-      re-fetches); nothing it does sits on the commit path.
+      re-fetches); nothing it does sits on the commit path. Push triggers:
+      debounce (~10 s) + max staleness (~5 min) + pinned-bytes threshold,
+      all knobs — each bounds a different risk (postage/bandwidth, time
+      exposure, loss size); design doc, *Auto-push policy*. Observation:
+      `status()` polling, `sync()`/`wait_for(root)` barriers,
+      exception-isolated rung-transition callbacks, and journal tailing
+      as the cross-process push channel (*Observing sync*).
 - [ ] **L2 — recordstore adoption** (tracked in recordstore's ROADMAP).
       Includes commit-boundary fsync batching + the `durability=` knob —
       L0 fsyncs per blob, which a many-small-node recordstore commit

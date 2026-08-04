@@ -101,7 +101,62 @@ when commits outpace pushes (push whatever is newest — which also implements
 the push-latest-only postage saving). Certainty on demand, not by making
 every commit slow: `status()` reports each root's rung, and `sync()` is the
 blocking barrier that returns only when everything is network-confirmed. The
-`write()`/`fsync()` contract, deliberately.
+`write()`/`fsync()` contract, deliberately. *When* the worker pushes, and
+how callers observe progress without polling, are specified below
+(*Auto-push policy*, *Observing sync*).
+
+### Auto-push policy: three triggers, three risks
+
+When does the background worker actually push? This is the WAL-checkpoint
+problem, and the answer has the same shape Postgres settled on
+(`checkpoint_timeout` + `max_wal_size`): multiple triggers, each bounding a
+different risk, because any single one has a failure mode.
+
+- **Debounce (~10 s default)** — after a commit, wait a short quiet period
+  to coalesce bursts. This is the economizer and the trigger specific to
+  Swarm: pushing immediately on every commit uploads blobs the very next
+  commit orphans (replaced values, rewritten trie nodes along the path);
+  coalescing means those intermediates never cross the network — postage
+  saved, not just bandwidth. Debounce is also *why* push-latest-only saves
+  money: the two policies are one mechanism, documented together. Alone it
+  starves: a continuous commit stream is never quiet.
+- **Max staleness (~5 min default)** — push regardless once the oldest
+  unpushed commit is older than this. Bounds how long any work exists on
+  exactly one disk. Alone it fails under heavy writing: the *amount* at
+  risk between pushes grows unboundedly.
+- **Pinned-bytes threshold** — push immediately when unpushed bytes exceed
+  it (a fraction of the budget when one is set — a quarter by default — an
+  absolute default otherwise). Bounds the *size* of a possible loss, and
+  doubles as the budget's pressure valve: pinned data is the only thing
+  eviction cannot touch, so pushing early is how the store makes room.
+  Alone it fails in the quiet case: a morning of small edits never reaches
+  the threshold and sits unpushed all day.
+
+`sync()` and budget pressure trigger immediately. All three are knobs —
+an archival tool may want an hour of staleness, a dictation app a tight
+byte bound. When the network is down the triggers keep firing and failing:
+the worker backs off exponentially and `status()` reports the growing
+exposure ("oldest unpushed commit: N minutes") instead of log-spamming.
+
+### Observing sync: from polling to push notifications
+
+Four surfaces, in increasing push-ness — the first two are the settled
+API, the third is an L1 deliverable, the fourth falls out of the format:
+
+1. **Poll**: `status()` — dashboards, cron checks.
+2. **Block**: `sync()` for everything; `wait_for(root, rung=…, timeout=…)`
+   for one commit — "don't exit until my work is safe."
+3. **Callbacks**: an observer on rung transitions
+   (`on_transition(root, rung)`), fired by the worker *after* it appends
+   the journal event — notifications inherit the lag rule, so a callback
+   never claims what isn't yet true. Callbacks run on the worker thread
+   and are exception-isolated (user code must not be able to kill the
+   push loop); asyncio callers bridge with `call_soon_threadsafe`.
+4. **Tail the journal** — the cross-process, cross-language push channel,
+   for free: every rung transition is one appended JSONL line, so any
+   process can inotify-watch `journal.jsonl` and fold events as they land.
+   No API, no Python required; this is the *intended* pattern for external
+   dashboards and tooling, not an accident of the format.
 
 ### The one rule that makes bookkeeping safe
 
