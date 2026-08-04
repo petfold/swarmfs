@@ -32,11 +32,13 @@ Consequences, in order of importance:
   affects the push/fetch workers, never `commit()`.
 - **Low storage cannot cause a correctness problem** — only back-pressure
   (see *Budget*).
-- **Performance**: local reads replace network round trips; push coalescing
-  means intermediate commits' orphaned blobs never cross the network
-  (postage saved, not just time); and client-side BMT addressing
-  (`swarmfs/splitter.py`) computes real Swarm references entirely offline,
-  so commit latency is pure local-disk latency.
+- **Performance**: local reads replace network round trips; push rounds
+  coalesce bursts of commits (fewer requests and confirmation passes —
+  though every root's blobs are pushed: see the L1 correction under
+  *Auto-push*, postage savings belong to app-assisted squash, R3); and
+  client-side BMT addressing (`swarmfs/splitter.py`) computes real Swarm
+  references entirely offline, so commit latency is pure local-disk
+  latency.
 
 ## Placement and the contract
 
@@ -96,9 +98,12 @@ the single coupling between the ladder and the eviction engine, and it
 inherits the fail-safe direction of the journal rule below.
 
 **Auto-push is the default**, as background sync: `commit_root` returns after
-the local write; a worker advances roots up the ladder, naturally coalescing
-when commits outpace pushes (push whatever is newest — which also implements
-the push-latest-only postage saving). Certainty on demand, not by making
+the local write; a worker advances roots up the ladder. *(Corrected at L1:
+the worker pushes **every** root's new-blob list, parents first — a
+blob-blind layer cannot skip intermediate roots, because a blob still
+referenced by the latest tree may be listed only in an intermediate's
+event. Push-latest-only is therefore an app-assisted squash/retention
+feature, not a worker behavior — see R3 in recordstore's track.)* Certainty on demand, not by making
 every commit slow: `status()` reports each root's rung, and `sync()` is the
 blocking barrier that returns only when everything is network-confirmed. The
 `write()`/`fsync()` contract, deliberately. *When* the worker pushes, and
@@ -113,13 +118,14 @@ problem, and the answer has the same shape Postgres settled on
 different risk, because any single one has a failure mode.
 
 - **Debounce (~10 s default)** — after a commit, wait a short quiet period
-  to coalesce bursts. This is the economizer and the trigger specific to
-  Swarm: pushing immediately on every commit uploads blobs the very next
-  commit orphans (replaced values, rewritten trie nodes along the path);
-  coalescing means those intermediates never cross the network — postage
-  saved, not just bandwidth. Debounce is also *why* push-latest-only saves
-  money: the two policies are one mechanism, documented together. Alone it
-  starves: a continuous commit stream is never quiet.
+  to coalesce bursts into one round: fewer requests, fewer confirmation
+  passes, one batch-TTL lookup. *(L1 finding: the postage saving this
+  bullet originally promised does not exist at this layer — every
+  committed root's blobs are pushed regardless, because skipping an
+  intermediate root would silently omit blobs the latest tree still
+  references. Skipping intermediates safely requires the app to rebase
+  blob lists — the R3 squash/retention feature.)* Alone it starves: a
+  continuous commit stream is never quiet.
 - **Max staleness (~5 min default)** — push regardless once the oldest
   unpushed commit is older than this. Bounds how long any work exists on
   exactly one disk. Alone it fails under heavy writing: the *amount* at

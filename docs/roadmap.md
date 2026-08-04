@@ -223,21 +223,34 @@ nothing evicts against a dying batch.
       5. `fcntl` is POSIX-only, so localstore is deliberately **not**
          exported from the package root — `import swarmfs` keeps working
          everywhere; format v1 is single-writer POSIX by scope.
-- [ ] **L1 — push worker + durability ladder**: deferred/direct upload,
-      tag/stewardship confirmation (validate mechanics live), TTL recording,
-      `sync()`, `status()`. Verification requirements (design doc,
-      *Verification and trust*): verified re-fetch of evicted blobs, the
-      push ref-equality assertion (erasure-coding drift tripwire), and
-      sampled retrieve-and-verify behind the network-confirmed rung —
-      node claims alone promote no further than on-node. The worker's
-      concurrency/rate is a knob (it shares the link with foreground
-      re-fetches); nothing it does sits on the commit path. Push triggers:
-      debounce (~10 s) + max staleness (~5 min) + pinned-bytes threshold,
-      all knobs — each bounds a different risk (postage/bandwidth, time
-      exposure, loss size); design doc, *Auto-push policy*. Observation:
-      `status()` polling, `sync()`/`wait_for(root)` barriers,
-      exception-isolated rung-transition callbacks, and journal tailing
-      as the cross-process push channel (*Observing sync*).
+- [x] **L1 — push worker + durability ladder** (`swarmfs/localsync.py`:
+      `Syncer` + `BeeRemote` + `SyncPolicy`; client tier gained
+      `stewardship_get` and a `deferred=` header on `bytes_post`).
+      Deferred/direct upload, stewardship + retrieve-and-verify
+      confirmation, TTL recording, `sync()` barrier and
+      `wait_for(root, rung)`, the three push triggers (debounce, max
+      staleness, pinned-bytes — all knobs), exponential backoff offline,
+      verified re-fetch heal wired as the store's fetcher, the push
+      ref-equality assertion, and exception-isolated journal listeners.
+      Acceptance held offline: push interrupted after *every* possible
+      number of uploaded blobs recovers by idempotent re-push with the
+      journal under-claiming throughout; wrong fetched bytes and
+      stewardship refusals block confirmation (root stays at *pushed*).
+      Live Bee validation is gated (`SWARMFS_TEST_BEE`) and still owed.
+      *Findings pinned:*
+      1. **Push-latest-only cannot be a worker behavior** (design doc
+         corrected in three places): a blob-blind layer must push every
+         root's event-blob list — a blob the latest tree still references
+         may be listed only in an intermediate root's event, so skipping
+         intermediates silently omits it. Squash needs the app to rebase
+         blob lists: recordstore's R3. Debounce therefore saves request
+         overhead and confirmation passes, not postage.
+      2. Topologically ordered work lists (`roots_below`) make the
+         parent-confirmed-before-child rule automatic — no retry dance.
+      3. The flock guards a single *process*, but app thread + worker
+         both mutate the fold, so `LocalStore` now carries a mutex and a
+         condition (backing `wait_for`); listeners fire outside the lock,
+         after the event is durable.
 - [ ] **L2 — recordstore adoption** (tracked in recordstore's ROADMAP).
       Includes commit-boundary fsync batching + the `durability=` knob —
       L0 fsyncs per blob, which a many-small-node recordstore commit

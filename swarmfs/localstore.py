@@ -31,11 +31,12 @@ import hashlib
 import json
 import os
 import shutil
+import threading
 import time
 import warnings
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 FORMAT_MAGIC = "swarmfs-localstore"
 FORMAT_VERSION = 1
@@ -66,6 +67,12 @@ class StoreLocked(RuntimeError):
     single-writer; concurrent readers of blob files are always safe)."""
 
 
+class BlobVerificationFailed(RuntimeError):
+    """Bytes fetched back for a known ref do not hash to that ref — the
+    endpoint served wrong content. Never masked as a KeyError: the blob
+    exists, someone lied about its bytes."""
+
+
 class BudgetExceededWarning(UserWarning):
     """The byte budget is exceeded and everything over it is pinned
     (unpushed) data. The limit is soft by design — push to convert pinned
@@ -82,6 +89,7 @@ class RootState:
     batch: Optional[str] = None
     ttl: Optional[float] = None
     confirmed_ts: Optional[float] = None
+    committed_ts: Optional[float] = None
 
 
 @dataclass
@@ -119,7 +127,16 @@ class LocalStore:
     def __init__(self, path: str, addressing: str = "swarm",
                  max_bytes: Optional[int] = None,
                  min_free_bytes: Optional[int] = None,
-                 min_evict_ttl: float = DEFAULT_MIN_EVICT_TTL):
+                 min_evict_ttl: float = DEFAULT_MIN_EVICT_TTL,
+                 fetcher: Optional[Callable[[str], bytes]] = None,
+                 verify_fetch: bool = True):
+        #: Optional network heal: called with a ref when `get` finds the blob
+        #: evicted; must return the bytes (a Syncer wires this to its remote).
+        self.fetcher = fetcher
+        #: Verify healed bytes hash to their ref before serving/re-storing
+        #: (the verified-re-fetch requirement; disable only for a trusted
+        #: node, mirroring swarmfs's own `verify` semantics).
+        self.verify_fetch = verify_fetch
         if addressing not in ADDRESSINGS:
             raise ValueError(f"unknown addressing {addressing!r}; "
                              f"one of {ADDRESSINGS}")
@@ -155,6 +172,12 @@ class LocalStore:
                 f"{self.path} is open in another process (single writer "
                 "per store in format v1)")
 
+        # One writer *process* (the flock), but within it the app thread and
+        # a sync worker both mutate the journal/fold — hence the mutex. The
+        # condition backs wait_for; listeners get events outside the lock.
+        self._mutex = threading.RLock()
+        self._cond = threading.Condition(self._mutex)
+        self._listeners: List[Callable[[dict], None]] = []
         # Fold of the journal (authoritative) …
         self._roots: Dict[str, RootState] = {}
         self._remote_roots: Dict[str, str] = {}
@@ -240,11 +263,37 @@ class LocalStore:
     def _append(self, event: dict) -> None:
         """Append one event — call only AFTER the fact it records is true
         (the lag rule: the journal may under-claim, never over-claim)."""
-        event["ts"] = time.time()
-        self._journal_fd.write(json.dumps(event, separators=(",", ":")) + "\n")
-        self._journal_fd.flush()
-        os.fsync(self._journal_fd.fileno())
-        self._apply(event)
+        with self._mutex:
+            event["ts"] = time.time()
+            self._journal_fd.write(
+                json.dumps(event, separators=(",", ":")) + "\n")
+            self._journal_fd.flush()
+            os.fsync(self._journal_fd.fileno())
+            self._apply(event)
+            self._cond.notify_all()
+            listeners = list(self._listeners)
+        # Exception-isolated, called on the mutating thread with the lock
+        # released; a listener must stay quick and non-blocking (set a flag,
+        # wake a worker) — heavy work belongs on the listener's own thread.
+        for fn in listeners:
+            try:
+                fn(event)
+            except Exception:
+                warnings.warn(
+                    f"localstore listener {fn!r} raised; ignored",
+                    RuntimeWarning, stacklevel=2)
+
+    def add_listener(self, fn: Callable[[dict], None]) -> None:
+        """Push notifications: `fn(event)` after every journal append —
+        `committed`/`pushed`/`confirmed`/… — after the fact it records is
+        true (notifications inherit the lag rule). Cross-process consumers
+        should tail `journal.jsonl` instead."""
+        with self._mutex:
+            self._listeners.append(fn)
+
+    def remove_listener(self, fn: Callable[[dict], None]) -> None:
+        with self._mutex:
+            self._listeners.remove(fn)
 
     def _apply(self, event: dict) -> None:
         ev = event.get("ev")
@@ -254,6 +303,7 @@ class LocalStore:
                 parent=event.get("parent"),
                 blobs=list(event.get("blobs", [])),
                 structure=set(event.get("structure", [])),
+                committed_ts=event.get("ts"),
             )
             for ref in self._roots[root].blobs:
                 self._blob_roots.setdefault(ref, []).append(root)
@@ -303,18 +353,22 @@ class LocalStore:
         committed root are orphans and never evicted (they may be a commit
         in progress); classify structure vs payload at ``commit_root``."""
         ref = self._address(data)
-        path = self._blob_path(ref)
-        if ref not in self._local:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            tmp = path + ".tmp"
-            with open(tmp, "wb") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            os.rename(tmp, path)
-            self._local[ref] = len(data)
-            self._enforce_budget()
+        with self._mutex:
+            if ref not in self._local:
+                self._write_blob(ref, data)
+                self._enforce_budget()
         return ref
+
+    def _write_blob(self, ref: str, data: bytes) -> None:
+        path = self._blob_path(ref)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp, path)
+        self._local[ref] = len(data)
 
     def get(self, ref: str) -> bytes:
         path = self._blob_path(ref)
@@ -322,13 +376,36 @@ class LocalStore:
             with open(path, "rb") as f:
                 data = f.read()
         except FileNotFoundError:
-            if ref in self._blob_roots:
+            if ref not in self._blob_roots:
+                raise KeyError(ref) from None
+            if self.fetcher is None:
                 raise BlobEvicted(
                     f"{ref} was evicted locally; the bytes are on Swarm "
-                    "(fetch requires the network / the L1 layer)") from None
-            raise KeyError(ref) from None
+                    "(attach a fetcher/Syncer, or reconnect)") from None
+            return self._heal(ref)
         os.utime(path)  # recency signal for LRU eviction
         return data
+
+    def _heal(self, ref: str) -> bytes:
+        """Verified re-fetch of an evicted blob: pull it back through
+        `fetcher`, check it hashes to its ref (unless `verify_fetch` is
+        off — trusted node), re-store it locally, serve it."""
+        data = self.fetcher(ref)
+        if self.verify_fetch and self._address(data) != ref:
+            raise BlobVerificationFailed(
+                f"re-fetched bytes for {ref[:16]}… do not hash to that "
+                "reference — the endpoint served wrong content")
+        with self._mutex:
+            if ref not in self._local:
+                self._write_blob(ref, data)
+                self._enforce_budget()
+        return data
+
+    def address(self, data: bytes) -> str:
+        """This store's ref for `data` without storing it (the addressing
+        scheme is fixed per store) — the primitive behind every
+        verification in the sync layer."""
+        return self._address(data)
 
     def put_many(self, datas: Iterable[bytes]) -> List[str]:
         return [self.put(d) for d in datas]
@@ -352,29 +429,32 @@ class LocalStore:
         is confirmed."""
         blobs = list(blobs)
         structure = set(structure)
-        if root in self._roots:
-            raise ValueError(f"root {root[:8]}… already committed")
-        if parent is not None and parent not in self._roots:
-            raise ValueError(f"parent {parent[:8]}… is not a committed root")
-        if not structure <= set(blobs):
-            raise ValueError("structure refs must be a subset of blobs")
-        missing = [b for b in blobs if b not in self._local]
-        if missing:
-            raise ValueError(
-                f"cannot commit {root[:8]}…: {len(missing)} listed blob(s) "
-                f"not in the store (first: {missing[0][:16]}…)")
-        self._append({
-            "ev": "committed", "root": root, "parent": parent,
-            "blobs": blobs, "structure": sorted(structure),
-            "bytes": sum(self._local[b] for b in blobs),
-        })
+        with self._mutex:
+            if root in self._roots:
+                raise ValueError(f"root {root[:8]}… already committed")
+            if parent is not None and parent not in self._roots:
+                raise ValueError(
+                    f"parent {parent[:8]}… is not a committed root")
+            if not structure <= set(blobs):
+                raise ValueError("structure refs must be a subset of blobs")
+            missing = [b for b in blobs if b not in self._local]
+            if missing:
+                raise ValueError(
+                    f"cannot commit {root[:8]}…: {len(missing)} listed "
+                    f"blob(s) not in the store (first: {missing[0][:16]}…)")
+            self._append({
+                "ev": "committed", "root": root, "parent": parent,
+                "blobs": blobs, "structure": sorted(structure),
+                "bytes": sum(self._local[b] for b in blobs),
+            })
 
     def mark_pushed(self, root: str) -> None:
         """Record that a push of `root`'s blobs was accepted by a Bee node.
         Call AFTER the push succeeded (the lag rule)."""
-        if root not in self._roots:
-            raise ValueError(f"unknown root {root[:8]}…")
-        self._append({"ev": "pushed", "root": root})
+        with self._mutex:
+            if root not in self._roots:
+                raise ValueError(f"unknown root {root[:8]}…")
+            self._append({"ev": "pushed", "root": root})
 
     def mark_confirmed(self, root: str, batch: Optional[str] = None,
                        ttl: Optional[float] = None) -> None:
@@ -383,42 +463,115 @@ class LocalStore:
         Call AFTER the verification passed (the lag rule). The parent must
         be confirmed first, so "network-confirmed" composes over the tree.
         This is what flips this root's blobs from pinned to evictable."""
-        state = self._roots.get(root)
-        if state is None:
-            raise ValueError(f"unknown root {root[:8]}…")
-        if state.parent is not None:
-            parent = self._roots.get(state.parent)
-            if parent is None or parent.rung != CONFIRMED:
-                raise ValueError(
-                    f"parent {state.parent[:8]}… must be confirmed before "
-                    f"{root[:8]}… (confirmation composes over ancestry)")
-        self._append({"ev": "confirmed", "root": root,
-                      "batch": batch, "ttl": ttl})
-        self._enforce_budget()  # newly evictable blobs may relieve pressure
+        with self._mutex:
+            state = self._roots.get(root)
+            if state is None:
+                raise ValueError(f"unknown root {root[:8]}…")
+            if state.parent is not None:
+                parent = self._roots.get(state.parent)
+                if parent is None or parent.rung != CONFIRMED:
+                    raise ValueError(
+                        f"parent {state.parent[:8]}… must be confirmed "
+                        f"before {root[:8]}… (confirmation composes over "
+                        "ancestry)")
+            self._append({"ev": "confirmed", "root": root,
+                          "batch": batch, "ttl": ttl})
+            self._enforce_budget()  # newly evictable blobs relieve pressure
 
     def network_confirmed(self, root: str) -> bool:
         """True iff `root` and every ancestor are confirmed — the whole tree
         is retrievable from the network."""
-        while root is not None:
-            state = self._roots.get(root)
-            if state is None or state.rung != CONFIRMED:
-                return False
-            root = state.parent
-        return True
+        with self._mutex:
+            while root is not None:
+                state = self._roots.get(root)
+                if state is None or state.rung != CONFIRMED:
+                    return False
+                root = state.parent
+            return True
 
     def set_remote_root(self, remote: str, root: str) -> None:
         """Record that `remote` (a feed, a node) points at `root` — the
         remote-tracking ref. Call AFTER the remote actually moved."""
-        self._append({"ev": "remote-root", "remote": remote, "root": root})
+        with self._mutex:
+            self._append({"ev": "remote-root", "remote": remote,
+                          "root": root})
 
     def remote_root(self, remote: str) -> Optional[str]:
-        return self._remote_roots.get(remote)
+        with self._mutex:
+            return self._remote_roots.get(remote)
 
     def parent_of(self, root: str) -> Optional[str]:
+        with self._mutex:
+            state = self._roots.get(root)
+            if state is None:
+                raise KeyError(root)
+            return state.parent
+
+    def wait_for(self, root: Optional[str] = None, rung: str = CONFIRMED,
+                 timeout: Optional[float] = None) -> bool:
+        """Block until `root` reaches `rung` (for CONFIRMED: it and every
+        ancestor — the network-confirmed sense), or until *every* root has
+        when `root` is None. Returns False on timeout. The certainty
+        barrier: `wait_for(root)` after a commit is "my work is safe"."""
+        target = _RUNG_ORDER[rung]
+
+        def ready() -> bool:
+            if root is None:
+                return all(self._reached(r, target) for r in self._roots)
+            return self._reached(root, target)
+
+        with self._cond:
+            return self._cond.wait_for(ready, timeout)
+
+    def _reached(self, root: str, target: int) -> bool:
         state = self._roots.get(root)
-        if state is None:
-            raise KeyError(root)
-        return state.parent
+        if state is None or _RUNG_ORDER[state.rung] < target:
+            return False
+        if target == _RUNG_ORDER[CONFIRMED]:
+            return self.network_confirmed(root)
+        return True
+
+    # -- sync-worker accessors ---------------------------------------------------
+
+    def roots_below(self, rung: str) -> List[Tuple[str, RootState]]:
+        """Roots not yet at `rung`, parents before children — the work list
+        for a push/confirm round (topological order makes the
+        parent-confirmed-first rule automatic)."""
+        with self._mutex:
+            def depth(r: str) -> int:
+                d = 0
+                while True:
+                    parent = self._roots[r].parent
+                    if parent is None or parent not in self._roots:
+                        return d
+                    r, d = parent, d + 1
+            target = _RUNG_ORDER[rung]
+            pending = [(root, state) for root, state in self._roots.items()
+                       if _RUNG_ORDER[state.rung] < target]
+            pending.sort(key=lambda item: depth(item[0]))
+            return pending
+
+    def sync_stats(self) -> dict:
+        """The numbers the auto-push triggers read, in one locked pass:
+        `last_commit_ts`, `oldest_unpushed_ts`, `pinned_bytes`, and
+        `unconfirmed` (count of roots below CONFIRMED)."""
+        with self._mutex:
+            now = time.time()
+            commit_ts = [s.committed_ts for s in self._roots.values()
+                         if s.committed_ts is not None]
+            unpushed_ts = [s.committed_ts for s in self._roots.values()
+                           if s.rung == COMMITTED
+                           and s.committed_ts is not None]
+            pinned = sum(size for ref, size in self._local.items()
+                         if not self._evictable(ref, now))
+            return {
+                "last_commit_ts": max(commit_ts) if commit_ts else None,
+                "oldest_unpushed_ts": (min(unpushed_ts) if unpushed_ts
+                                       else None),
+                "pinned_bytes": pinned,
+                "unconfirmed": sum(1 for s in self._roots.values()
+                                   if s.rung != CONFIRMED),
+            }
 
     def pin(self, name: str, refs: Iterable[str]) -> None:
         """Hold the listed blobs against eviction under `name` (working-set
@@ -482,50 +635,53 @@ class LocalStore:
         freed. Payload blobs go before structure blobs (structure is small,
         touched by every operation, and keeps diff/merge local even when
         values are remote), LRU by file mtime within each class."""
-        now = time.time()
-        structure_refs = set()
-        for state in self._roots.values():
-            structure_refs |= state.structure
-        candidates = [r for r in self._local if self._evictable(r, now)]
-        def mtime(ref: str) -> float:
-            try:
-                return os.stat(self._blob_path(ref)).st_mtime
-            except FileNotFoundError:
-                return 0.0
-        candidates.sort(key=lambda r: (r in structure_refs, mtime(r)))
-        freed = 0
-        for ref in candidates:
-            if freed >= nbytes:
-                break
-            try:
-                os.unlink(self._blob_path(ref))
-            except FileNotFoundError:
-                pass
-            freed += self._local.pop(ref, 0)
-        return freed
+        with self._mutex:
+            now = time.time()
+            structure_refs = set()
+            for state in self._roots.values():
+                structure_refs |= state.structure
+            candidates = [r for r in self._local if self._evictable(r, now)]
+
+            def mtime(ref: str) -> float:
+                try:
+                    return os.stat(self._blob_path(ref)).st_mtime
+                except FileNotFoundError:
+                    return 0.0
+            candidates.sort(key=lambda r: (r in structure_refs, mtime(r)))
+            freed = 0
+            for ref in candidates:
+                if freed >= nbytes:
+                    break
+                try:
+                    os.unlink(self._blob_path(ref))
+                except FileNotFoundError:
+                    pass
+                freed += self._local.pop(ref, 0)
+            return freed
 
     # -- status -----------------------------------------------------------------
 
     def status(self) -> StoreStatus:
-        now = time.time()
-        pinned = evictable = 0
-        for ref, size in self._local.items():
-            if self._evictable(ref, now):
-                evictable += size
-            else:
-                pinned += size
-        return StoreStatus(
-            blob_count=len(self._local),
-            total_bytes=pinned + evictable,
-            pinned_bytes=pinned,
-            evictable_bytes=evictable,
-            max_bytes=self.max_bytes,
-            only_on_swarm_count=sum(
-                1 for ref in self._blob_roots if ref not in self._local),
-            roots={r: s.rung for r, s in self._roots.items()},
-            remote_roots=dict(self._remote_roots),
-            pins={n: len(refs) for n, refs in self._pins.items()},
-        )
+        with self._mutex:
+            now = time.time()
+            pinned = evictable = 0
+            for ref, size in self._local.items():
+                if self._evictable(ref, now):
+                    evictable += size
+                else:
+                    pinned += size
+            return StoreStatus(
+                blob_count=len(self._local),
+                total_bytes=pinned + evictable,
+                pinned_bytes=pinned,
+                evictable_bytes=evictable,
+                max_bytes=self.max_bytes,
+                only_on_swarm_count=sum(
+                    1 for ref in self._blob_roots if ref not in self._local),
+                roots={r: s.rung for r, s in self._roots.items()},
+                remote_roots=dict(self._remote_roots),
+                pins={n: len(refs) for n, refs in self._pins.items()},
+            )
 
     # -- lifecycle ----------------------------------------------------------------
 

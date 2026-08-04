@@ -196,11 +196,16 @@ class SwarmClient:
         tag: int | None = None,
         pin: bool = False,
         redundancy: int | None = None,
+        deferred: bool | None = None,
     ) -> str:
         """POST /bytes — upload a blob, returns its reference (hex).
 
         ``redundancy`` is Bee's erasure-coding level (0–4): parity chunks are
         added to multi-chunk trees so content survives missing chunks.
+        ``deferred`` sets ``swarm-deferred-upload``: True stores on the node
+        and syncs in the background, False pushes straight to the network
+        before returning (slower, but the 201 then means the network has
+        it); None leaves the node's default.
         """
         url = f"{self.api_url}/bytes"
         headers = {
@@ -213,6 +218,8 @@ class SwarmClient:
             headers["swarm-pin"] = "true"
         if redundancy is not None:
             headers["swarm-redundancy-level"] = str(redundancy)
+        if deferred is not None:
+            headers["swarm-deferred-upload"] = "true" if deferred else "false"
         session = await self._get_session()
         async with session.post(url, data=data, headers=headers) as resp:
             await self._raise_for_status(resp, url)
@@ -336,6 +343,16 @@ class SwarmClient:
         async with session.get(url) as resp:
             await self._raise_for_status(resp, url)
             return await resp.json()
+
+    async def stewardship_get(self, ref: str) -> bool:
+        """GET /stewardship/{ref} — the node's claim that the reference is
+        retrievable from the network. A claim, not a proof: for the
+        trust-tiered confirmation policy see swarmfs.localsync."""
+        url = f"{self.api_url}/stewardship/{ref}"
+        session = await self._get_session()
+        async with session.get(url) as resp:
+            await self._raise_for_status(resp, url)
+            return bool((await resp.json()).get("isRetrievable"))
 
     async def tag_create(self) -> int:
         """POST /tags — a tag uid for tracking upload progress."""
@@ -487,6 +504,7 @@ for _name in (
     "stamp_dilute",
     "chainstate",
     "wallet",
+    "stewardship_get",
     "tag_create",
     "tag_get",
     "feed_head",
