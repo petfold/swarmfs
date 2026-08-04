@@ -226,18 +226,25 @@ serves them. That is why "evict it, Swarm holds it" is sound against an
 untrusted open network. Four requirements and one deliberate non-use keep
 that story honest:
 
-1. **Verified re-fetch (L1 requirement).** A lazy re-fetch of an evicted
-   blob MUST be verified against its ref before being served — reuse the
-   verifying joiner (`swarmfs/join.py`) or the whole-blob check
+1. **Verified re-fetch (L1 requirement, default on).** A lazy re-fetch of
+   an evicted blob is verified against its ref before being served — reuse
+   the verifying joiner (`swarmfs/join.py`) or the whole-blob check
    (`content_address(data) == ref`). Without this, the trust model silently
    degrades from "trust nothing but your own disk" to "trust whatever
-   served the re-fetch."
-2. **Push ref-equality assertion (L1 requirement).** The reference the node
-   returns for an upload MUST equal the locally computed one, or the push
-   fails loudly. This is a free end-to-end tripwire for the known
-   address-space fork: a node uploading with erasure coding on returns a
-   *different* reference for the same bytes (parity changes every
-   intermediate chunk), and `swarm` addressing is pinned to redundancy off.
+   served the re-fetch." Cost: hash time on a path that already paid for a
+   network round trip — small relatively, but BMT is pure Python and
+   nonzero on large blobs, so it is a knob with swarmfs's own `verify`
+   semantics as precedent: on by default, disableable for a trusted-node
+   setup.
+2. **Push ref-equality assertion (L1 requirement, not optional).** The
+   reference the node returns for an upload MUST equal the locally
+   computed one, or the push fails loudly. This is a free end-to-end
+   tripwire for the known address-space fork: a node uploading with
+   erasure coding on returns a *different* reference for the same bytes
+   (parity changes every intermediate chunk), and `swarm` addressing is
+   pinned to redundancy off. Free because the local ref already exists —
+   it is the blob's filename — so the assertion is a string comparison;
+   there is no cost to make optional.
 3. **Confirmation is tiered by trust (L1 policy).** Node claims (tags,
    stewardship responses) promote a root cheaply to *on-node*;
    *network-confirmed* — the rung that unlocks eviction — requires
@@ -245,6 +252,11 @@ that story honest:
    sample of the root's blobs, with the sampling rate a paranoia knob.
    Since confirmation is precisely what permits deleting the local copy,
    the verification budget is spent exactly where the invariant lives.
+   Cost: background bandwidth in the push worker, never application
+   latency — confirmation is off the commit path by design. The knob's
+   default is nonzero; setting it to `0` is a deliberate operator opt-out
+   that reverts eviction safety to trusting the node's claims, and
+   `status()` should say so when it is off.
    (Whether stewardship's check already exercises the network path rather
    than the node's own store is one of the L1 questions to settle live.)
 4. **Local scrub (L4).** The format already mandates that a blob file not
