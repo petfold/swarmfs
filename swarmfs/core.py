@@ -408,6 +408,25 @@ class SwarmFileSystem(AsyncFileSystem):
     async def _read_reference(self, ref: str, start=None, end=None) -> bytes:
         return await (await self._get_reader()).bytes_get(ref, start, end)
 
+    def read_reference(self, ref: str, start=None, end=None) -> bytes:
+        """Raw-reference read: the bytes behind `ref` (optionally the
+        `[start, end)` range), routed through the same reader as path
+        reads — so verification policy applies, and in local-first mode
+        locally held refs are served from disk. The supported public form
+        of the raw-ref primitive (grown for ontodag-fs, which was
+        reaching into `_read_reference`); use `cat`/`open` for paths
+        inside manifests."""
+        return sync(self.loop, self._read_reference, ref, start, end)
+
+    async def _reference_size(self, ref: str) -> int | None:
+        return await (await self._get_reader()).bytes_size(ref)
+
+    def reference_size(self, ref: str) -> int | None:
+        """Size in bytes of the content behind a raw `ref`, through the
+        same reader (local-first answers from the store without reading
+        the blob; otherwise a header-only request)."""
+        return sync(self.loop, self._reference_size, ref)
+
     async def _get_backend(self) -> ListingBackend:
         if self._backend is None:
             await self._setup()

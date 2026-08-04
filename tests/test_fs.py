@@ -238,3 +238,19 @@ def test_dask_partitioned_parquet_demo():
     )
     out = ddf.compute().sort_values("id").reset_index(drop=True)
     pd.testing.assert_frame_equal(out[["id", "part"]], expected[["id", "part"]])
+
+
+def test_read_reference_public(fs):
+    """The public raw-reference read (grown for ontodag-fs): whole blob,
+    range, and size — through the same reader as path reads."""
+    import hashlib
+
+    fs, root_hex = fs
+    data = b"raw reference payload"
+    ref = hashlib.sha256(data).hexdigest()
+    fs.client.store[bytes.fromhex(ref)] = data
+
+    assert fs.read_reference(ref) == data
+    assert fs.read_reference(ref, 4, 13) == data[4:13]
+    assert fs.read_reference(ref, 4, 4) == b""
+    assert fs.reference_size(ref) == len(data)

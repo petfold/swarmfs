@@ -8,7 +8,7 @@ local-first design in [localstore-design.md](localstore-design.md) and its
 Tables here are pinned against the code by `tests/test_reference.py` — if a
 name or parameter in this file and the code disagree, the suite fails.
 
-Package version this file describes: `0.7.1`.
+Package version this file describes: `0.8.0`.
 
 ## 1. Vocabulary
 
@@ -77,6 +77,8 @@ Methods beyond the fsspec standard surface:
 | `SwarmFileSystem.latest` | `(ref)` | the current head of `ref`'s lineage (read-your-writes). |
 | `SwarmFileSystem.sync` | `(timeout=None)` | local-first barrier: block until every commit is network-confirmed. |
 | `SwarmFileSystem.sync_status` | `()` | the local store's `StoreStatus`. |
+| `SwarmFileSystem.read_reference` | `(ref, start=None, end=None)` | raw-reference read (bytes behind a ref, optionally a range) through the policy reader — verification and local-first apply. For paths inside manifests use `cat`/`open`. |
+| `SwarmFileSystem.reference_size` | `(ref)` | size behind a raw reference, same path (local-first answers without reading the blob). |
 | `SwarmFileSystem.discard_staged` | `()` | drop staged writes without committing. |
 | `SwarmFileSystem.modified` | `(path)` | fixed epoch constant (content is immutable at a ref); checks existence. |
 
