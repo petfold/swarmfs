@@ -275,11 +275,18 @@ nothing evicts against a dying batch.
          both mutate the fold, so `LocalStore` now carries a mutex and a
          condition (backing `wait_for`); listeners fire outside the lock,
          after the event is durable.
-- [ ] **L2 — recordstore adoption** (tracked in recordstore's ROADMAP).
-      Includes commit-boundary fsync batching + the `durability=` knob —
-      L0 fsyncs per blob, which a many-small-node recordstore commit
-      would feel; the acceptance bar is parity with `DirBytesStore`
-      (design doc, *Performance posture*).
+- [x] **L2 — recordstore adoption** (2026-08-04; details in recordstore's
+      ROADMAP/CHANGELOG). Commit-boundary fsync batching landed here as
+      `durability="commit"` (default; "blob" = paranoid per-put; a commit
+      listing a pre-session orphan re-verifies it first — a torn write
+      must not be claimed durable), plus `has_root`/`latest_root` (the
+      journal as the pointer). recordstore side: `local_first_store()`,
+      journal integration via recording wrappers in `commit()`, both
+      acceptance tests green (cable-pull; DirBytesStore latency parity).
+      recordstore finding worth knowing: canonicity forced a `HEAD`
+      pointer file beside the journal — returning to a prior state
+      re-uses its root, which the append-only journal refuses to
+      re-record.
 - [ ] **L3 — swarmfs write-path adoption**: commit-engine spool →
       localstore; transactional commits become local-first; bzzf feed
       updates ride the ladder.
