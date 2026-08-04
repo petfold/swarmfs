@@ -401,7 +401,8 @@ See `docs/roadmap.md`. Short version:
   recordstore adopted it (its 0.17/0.18); swarmfs's own write path too:
   `SwarmFileSystem(local_store=..., redundancy=0)` commits offline via
   `LocalFirstCommitEngine`, `fs.sync()` is the barrier, bzzf feeds publish only after
-  network confirmation.
+  network confirmation, and reads are local-first for known refs (offline
+  read-your-writes incl. `ls` and ranges; foreign refs still read through the node).
 - **later** encrypted refs (128-hex), ACT, redundancy level as write kwarg, gateway fallback,
   wire up the server-side listing endpoint when it lands.
 

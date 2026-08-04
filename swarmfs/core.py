@@ -67,6 +67,57 @@ class SwarmTransaction(Transaction):
         self.fs = None
 
 
+class LocalFirstReader:
+    """The read side of local-first mode: refs the local store holds (or
+    can heal by verified re-fetch) are served from disk — which is what
+    makes offline read-your-writes work — and everything foreign
+    delegates to the node's reader unchanged, preserving range-granular
+    remote reads. Local bytes need no re-verification: locally written
+    blobs were addressed by us, healed blobs are hash-checked on the way
+    in. Ranges on local blobs are slices (the whole blob is on disk)."""
+
+    def __init__(self, local, inner):
+        self.local = local
+        self.inner = inner
+
+    def _try_local(self, ref: str) -> bytes | None:
+        try:
+            return self.local.get(ref)  # heals evicted refs via the syncer
+        except KeyError:
+            # unknown (foreign) ref — or evicted with the network down, in
+            # which case the inner reader fails with the honest network
+            # error anyway
+            return None
+
+    async def bytes_get(self, ref: str, start=None, end=None) -> bytes:
+        data = await asyncio.to_thread(self._try_local, ref)
+        if data is None:
+            return await self.inner.bytes_get(ref, start, end)
+        if start is None and end is None:
+            return data
+        if start is not None and end is not None and end <= start:
+            return b""
+        return data[start or 0: end]
+
+    async def bytes_size(self, ref: str) -> int | None:
+        size = self.local.local_size(ref)
+        if size is not None:
+            return size
+        return await self.inner.bytes_size(ref)
+
+    async def bytes_iter(self, ref: str, chunk_size: int = 1 << 20):
+        data = await asyncio.to_thread(self._try_local, ref)
+        if data is None:
+            async for chunk in self.inner.bytes_iter(ref, chunk_size):
+                yield chunk
+            return
+        for i in range(0, len(data), chunk_size):
+            yield data[i: i + chunk_size]
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
 class SwarmFileSystem(AsyncFileSystem):
     """Read/write access to Swarm content via a Bee node.
 
@@ -284,7 +335,23 @@ class SwarmFileSystem(AsyncFileSystem):
 
         try:
             await self.client.health()
-        except aiohttp.ClientConnectionError as e:
+        except (aiohttp.ClientConnectionError, ConnectionError) as e:
+            if self._local is not None:
+                # Local-first: an unreachable endpoint is *your node,
+                # currently offline* — that's the normal mode, not an
+                # error. Serve everything the local store holds; foreign
+                # refs fail at fetch time with the plain network error.
+                # (No gateway-detection risk: the endpoint is fixed by
+                # configuration and local-first pushes need the node-owner
+                # API anyway.) Verification stays off unless forced —
+                # there is nothing remote to distrust while offline.
+                self.trusted = True
+                self.verify_active = bool(self.verify)
+                reader = (self.client if not self.verify_active
+                          else self._verifying_reader())
+                self._reader = LocalFirstReader(self._local, reader)
+                self._setup_done = True
+                return
             raise ConnectionError(
                 f"cannot reach a Bee node at {self.api_url} ({e}). swarmfs expects "
                 "a node you run yourself — a local light node is quick to set up: "
@@ -313,13 +380,19 @@ class SwarmFileSystem(AsyncFileSystem):
             )
         self.trusted = trusted
         self.verify_active = self.verify if self.verify is not None else not trusted
-        if self.verify_active:
-            from .join import VerifyingReader
-
-            self._reader = VerifyingReader(self.client)
-        else:
-            self._reader = self.client
+        self._reader = (self._verifying_reader() if self.verify_active
+                        else self.client)
+        if self._local is not None:
+            # Local-first reads: refs the store holds are served from
+            # disk (offline read-your-writes); foreign refs go to the
+            # node as before.
+            self._reader = LocalFirstReader(self._local, self._reader)
         self._setup_done = True
+
+    def _verifying_reader(self):
+        from .join import VerifyingReader
+
+        return VerifyingReader(self.client)
 
     async def _get_reader(self):
         await self._setup()

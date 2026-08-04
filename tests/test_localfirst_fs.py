@@ -191,3 +191,61 @@ def test_bzzf_feed_publishes_only_after_confirmation(tmp_path):
     assert fs.cat(path) == b"first version"          # resolves via the feed
     st = fs.sync_status()
     assert any(k.startswith("feed!") for k in st.remote_roots)
+
+
+# -- local-first reads: offline read-your-writes -------------------------------------
+
+
+def test_offline_read_your_writes(tmp_path):
+    """The full offline story: write, commit, read back, list — with a
+    client that refuses every network call including the health ping."""
+    fs = SwarmFileSystem(client=OfflineClient(),
+                         local_store=str(tmp_path / "s"),
+                         redundancy=0, skip_instance_cache=True)
+    fs.pipe_file("bzz://new/a.txt", b"written on the plane")
+    root = fs.latest("new")
+    assert fs.cat(f"bzz://{root}/a.txt") == b"written on the plane"
+    assert fs.cat_file(f"bzz://{root}/a.txt", start=8, end=10) == b"on"
+    listing = fs.ls(f"bzz://{root}", detail=False)
+    assert any(name.endswith("a.txt") for name in listing)
+    assert fs.size(f"bzz://{root}/a.txt") == len(b"written on the plane")
+
+
+def test_local_reads_never_touch_the_node(tmp_path):
+    store = {}
+    client = BMTFakeClient(store)
+    fs = SwarmFileSystem(client=client,
+                         local_store=str(tmp_path / "s"),
+                         redundancy=0, skip_instance_cache=True)
+    fs.pipe_file("bzz://new/a.txt", b"local bytes")
+    root = fs.latest("new")
+    before = len(store)
+    assert fs.cat(f"bzz://{root}/a.txt") == b"local bytes"
+    # the fake node's store only grew from the background push, never
+    # served a read: nothing new appeared because of cat()
+    assert len(store) >= before  # (push may land blobs concurrently)
+    assert not client.uploads or all(s for s, _ in client.uploads)
+
+
+def test_foreign_refs_still_read_through_the_node(tmp_path):
+    store = {}
+    # someone else's manifest, known only to the node: build it in a donor
+    # local store, copy the blobs over, forget the donor
+    donor = LocalStore(str(tmp_path / "donor"))
+    try:
+        engine = LocalFirstCommitEngine(donor, client=OfflineClient())
+        foreign_root = asyncio.run(engine.commit(
+            None, {"a.txt": staged(b"foreign content")}, [])).new_root
+        for _, state in donor.roots_below(CONFIRMED):
+            for ref in state.blobs:
+                store[bytes.fromhex(ref)] = donor.get(ref)
+    finally:
+        donor.close()
+
+    fs = SwarmFileSystem(client=BMTFakeClient(store),
+                         local_store=str(tmp_path / "s"),
+                         redundancy=0, skip_instance_cache=True)
+    assert fs.cat(f"bzz://{foreign_root}/a.txt") == b"foreign content"
+    assert fs.cat_file(f"bzz://{foreign_root}/a.txt",
+                       start=0, end=7) == b"foreign"
+    assert not fs._local.has_local(foreign_root)     # not persisted

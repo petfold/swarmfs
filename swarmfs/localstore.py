@@ -510,6 +510,13 @@ class LocalStore:
         """Present on local disk right now (False for evicted/unknown)."""
         return ref in self._local
 
+    def local_size(self, ref: str) -> Optional[int]:
+        """Byte size of a locally present blob, without reading it
+        (None for evicted/unknown) — the cheap answer `info`/`size`
+        consumers need."""
+        with self._mutex:
+            return self._local.get(ref)
+
     # -- local-first surface ----------------------------------------------------
 
     def commit_root(self, root: str, parent: Optional[str],

@@ -307,8 +307,18 @@ nothing evicts against a dying batch.
       same canonical-revisit behavior as recordstore's trie (removing a
       file can reproduce an earlier root byte-for-byte — empty-node
       pruning — which the journal rightly refuses to re-record).
-      Read path deliberately unchanged (reads go to the node; fsspec
-      caching or a future L5 can revisit).
+      **Reads are local-first for known refs** (follow-up, same day —
+      the original "reads unchanged" scoping left offline
+      read-your-writes broken at the fs level): `LocalFirstReader`
+      wraps the reader seam — refs the store holds (or heals) are served
+      and range-sliced from disk, foreign refs delegate to the node
+      unchanged (preserving range-granular remote reads; foreign content
+      is deliberately not persisted — that niche belongs to fsspec's
+      `blockcache::`/`simplecache::` chaining). In local-first mode an
+      unreachable endpoint at `_setup` is "your node, currently
+      offline", not an error — so write, commit, `cat`, `ls`, ranged
+      reads all work with no network at all, against a client that
+      refuses every call (tested).
 - [ ] **L4 — working-set controls** — mostly landed 2026-08-04 via the
       recordstore R2/R3 work: named pins and `gc_orphans` live here
       (`pin`/`unpin` since L0; `rebase_root` + `gc_orphans` for

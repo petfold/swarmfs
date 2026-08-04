@@ -451,7 +451,11 @@ each with its knob:
   meaningfully slower than `DirBytesStore` at its default durability.
 - **L3 — swarmfs write-path adoption.** The commit engine's spool becomes a
   `localstore`; transactional commits become local-first with background
-  push; `bzzf` feed update rides the same ladder.
+  push; `bzzf` feed update rides the same ladder. *(Extended at
+  implementation: reads are local-first too for refs the store knows —
+  offline read-your-writes — while foreign refs keep the range-granular
+  node path; whole-blob caching of foreign content stays out, that niche
+  is fsspec's `blockcache::`.)*
 - **L4 — Working-set controls.** Named pins, `fetch`, only-on-Swarm
   accounting surfaced in `status()`, retention policy, and `scrub()`
   (local bitrot detection with verified-re-fetch healing).
