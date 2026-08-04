@@ -124,3 +124,32 @@ def test_live_encrypted_roundtrip(tmp_path):
     assert reader.cat(f"bzz://{root}/a.txt") == b"alpha " * 10
     assert reader.cat_file(f"bzz://{root}/sub/b.txt",
                            start=0, end=4) == b"beta"
+
+
+@pytest.mark.skipif(not (BEE and STAMP),
+                    reason="set SWARMFS_TEST_BEE and SWARMFS_TEST_STAMP")
+def test_live_bzzf_over_encrypted_root(tmp_path):
+    """A feed can point at an encrypted root: the update carries the full
+    128-hex reference, so readers of the stable URL get decryption
+    transparently — settled live 2026-08-04."""
+    pytest.importorskip("eth_keys")
+    import time
+
+    from swarmfs.feedfs import SwarmFeedFileSystem
+
+    fs = SwarmFeedFileSystem(api_url=BEE, stamp=STAMP, signer="11" * 32,
+                             encrypt=True, skip_instance_cache=True)
+    topic = f"enc-test-{int(time.time())}"
+    path = f"bzzf://{fs.signer.owner_hex}/{topic}/secret.txt"
+    fs.pipe_file(path, b"encrypted behind a stable URL")
+
+    reader = SwarmFeedFileSystem(api_url=BEE, skip_instance_cache=True)
+    deadline = time.time() + 90
+    data = None
+    while time.time() < deadline:  # feeds are eventually consistent
+        try:
+            data = reader.cat(path)
+            break
+        except Exception:
+            time.sleep(3)
+    assert data == b"encrypted behind a stable URL"

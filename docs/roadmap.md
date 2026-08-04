@@ -357,12 +357,15 @@ nothing evicts against a dying batch.
       them); the verifying reader refuses 128-hex refs loudly (it cannot
       traverse ciphertext — client-side decryption would be the future
       unlock for verified encrypted reads, deliberately not attempted).
-      Offline suite green incl. the swarm-encrypt-faithful FakeClient;
-      **live validation pending** (the local node was down at
-      implementation time): `test_live_encrypted_roundtrip` is gated and
-      ready — it settles whether `/bytes/<128-hex>` decrypts server-side
-      on Bee 2.8.1, and bzzf feeds pointing at encrypted roots remain
-      untested.
+      Offline suite green incl. the swarm-encrypt-faithful FakeClient.
+      **Live-validated against Bee 2.8.1 (2026-08-04), both open
+      questions settled in our favor:** `/bytes/<128-hex>` decrypts
+      server-side — a fresh instance walked an encrypted directory
+      manifest and read files (incl. ranges) with nothing cached
+      (`test_live_encrypted_roundtrip`); and **bzzf feeds point at
+      encrypted roots** — the feed update carries the full 128-hex
+      reference, so readers of the stable URL get decryption
+      transparently (`test_live_bzzf_over_encrypted_root`).
 - [ ] ACT-protected content (pass the `swarm-act-*` headers through).
 - [x] Redundancy level as a write option (erasure coding): `redundancy=0..4` storage
       option (default **2**; 0 disables, None = node default), passed as
