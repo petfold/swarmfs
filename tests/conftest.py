@@ -153,11 +153,19 @@ class FakeClient:
         self.uploads.append((stamp, len(data)))
         return addr.hex()
 
-    async def bytes_post(self, data, stamp: str, tag=None, pin=False, redundancy=None) -> str:
+    async def bytes_post(self, data, stamp: str, tag=None, pin=False,
+                         redundancy=None, deferred=None, encrypt=False) -> str:
         if not isinstance(data, bytes):
             data.seek(0)
             data = data.read()
-        ref = hashlib.sha256(data).digest()
+        if encrypt:
+            # Bee's swarm-encrypt contract: the returned reference is
+            # address ‖ decryption key (64 bytes); only the full reference
+            # yields the plaintext back
+            ref = (hashlib.sha256(data).digest()
+                   + hashlib.sha256(b"key" + data).digest())
+        else:
+            ref = hashlib.sha256(data).digest()
         self.store[ref] = data
         self.uploads.append((stamp, len(data)))
         self.redundancies.append(redundancy)

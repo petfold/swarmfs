@@ -197,6 +197,7 @@ class SwarmClient:
         pin: bool = False,
         redundancy: int | None = None,
         deferred: bool | None = None,
+        encrypt: bool = False,
     ) -> str:
         """POST /bytes — upload a blob, returns its reference (hex).
 
@@ -205,7 +206,10 @@ class SwarmClient:
         ``deferred`` sets ``swarm-deferred-upload``: True stores on the node
         and syncs in the background, False pushes straight to the network
         before returning (slower, but the 201 then means the network has
-        it); None leaves the node's default.
+        it); None leaves the node's default. With ``encrypt`` the node
+        encrypts chunk-by-chunk and the returned reference is 128 hex —
+        address plus decryption key; whoever holds the full reference can
+        read, everyone else stores noise.
         """
         url = f"{self.api_url}/bytes"
         headers = {
@@ -220,6 +224,8 @@ class SwarmClient:
             headers["swarm-redundancy-level"] = str(redundancy)
         if deferred is not None:
             headers["swarm-deferred-upload"] = "true" if deferred else "false"
+        if encrypt:
+            headers["swarm-encrypt"] = "true"
         session = await self._get_session()
         async with session.post(url, data=data, headers=headers) as resp:
             await self._raise_for_status(resp, url)

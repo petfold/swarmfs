@@ -150,6 +150,15 @@ class SwarmFileSystem(AsyncFileSystem):
         Erasure-coding level 0–4 for uploads (Bee's ``swarm-redundancy-level``):
         parity chunks are added so content survives missing chunks. Defaults
         to 2 ("strong"); pass 0 to disable, or None for the node's default.
+    encrypt:
+        Encrypt every upload (files AND manifest nodes) node-side; commits
+        and uploads then return 128-hex references — address plus
+        decryption key. Whoever holds the full reference can read (the
+        node decrypts in the load path); everyone else stores noise. A
+        lineage is either encrypted or not — patching across the boundary
+        is refused. Incompatible with ``local_store`` (encrypted refs are
+        not content addresses) and with ``verify`` (the verifying reader
+        cannot traverse ciphertext; it refuses 128-hex refs loudly).
     allow_gateway:
         Explicitly permit using an endpoint that is not your own node.
         Endpoints where the node-owner API (``/stamps``) is unreachable are
@@ -186,6 +195,7 @@ class SwarmFileSystem(AsyncFileSystem):
         stamp: str | None = None,
         pin: bool = False,
         redundancy: int | None = 2,
+        encrypt: bool = False,
         allow_gateway: bool = False,
         verify: bool | None = None,
         client: SwarmClient | None = None,
@@ -207,6 +217,7 @@ class SwarmFileSystem(AsyncFileSystem):
         if redundancy is not None and redundancy not in range(5):
             raise ValueError(f"redundancy must be 0-4, got {redundancy!r}")
         self.redundancy = redundancy
+        self.encrypt = encrypt
         self.allow_gateway = allow_gateway
         self.verify = verify
         self.verify_active: bool | None = None  # resolved by _setup
@@ -219,6 +230,13 @@ class SwarmFileSystem(AsyncFileSystem):
         self._local = None
         self._syncer = None
         if local_store is not None:
+            if encrypt:
+                raise ValueError(
+                    "local_store cannot be combined with encrypt=True: "
+                    "encrypted references are not content addresses (the "
+                    "decryption key rides in the reference), so the local "
+                    "store's BMT address space and journal cannot hold "
+                    "them")
             if redundancy not in (None, 0):
                 raise ValueError(
                     "local_store requires redundancy=0: erasure coding "
@@ -239,7 +257,7 @@ class SwarmFileSystem(AsyncFileSystem):
         else:
             self._engine = CommitEngine(
                 self.client, StampManager(self.client), pin=pin,
-                redundancy=redundancy
+                redundancy=redundancy, encrypt=encrypt
             )
         # staging, keyed by the *origin* root of each manifest lineage
         self._staged: dict[str, dict[str, StagedWrite]] = {}
@@ -893,11 +911,6 @@ class SwarmFileSystem(AsyncFileSystem):
             raise ValueError(f"redundancy must be 0-4, got {red!r}")
 
         if os.path.isdir(lpath):
-            if encrypt:
-                raise NotImplementedError(
-                    "encrypt=True is only supported for single-file uploads; "
-                    "directory manifests are built client-side, unencrypted"
-                )
             writes: dict[str, StagedWrite] = {}
             for dirpath, _, files in os.walk(lpath):
                 for fname in files:
@@ -912,8 +925,10 @@ class SwarmFileSystem(AsyncFileSystem):
             if not writes:
                 raise FileNotFoundError(f"{lpath} is an empty directory; nothing to upload")
             engine = self._engine
-            if red != engine.redundancy:
-                engine = CommitEngine(self.client, engine.stamps, pin=self.pin, redundancy=red)
+            enc = encrypt or self.encrypt
+            if red != engine.redundancy or enc != engine.encrypt:
+                engine = CommitEngine(self.client, engine.stamps, pin=self.pin,
+                                      redundancy=red, encrypt=enc)
             res = await engine.commit(None, writes, [], stamp=self.stamp)
             self.commit_log.append(res)
             return res.new_root
@@ -928,7 +943,7 @@ class SwarmFileSystem(AsyncFileSystem):
                 batch,
                 filename=os.path.basename(lpath),
                 content_type=ct,
-                encrypt=encrypt,
+                encrypt=encrypt or self.encrypt,
                 pin=self.pin,
                 redundancy=red,
             )

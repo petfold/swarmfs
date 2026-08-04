@@ -62,6 +62,7 @@ Storage options (constructor / `fsspec.filesystem("bzz", ...)`):
 | `stamp` | None (= `"auto"` at commit) | batch id, or auto-pick the usable batch with longest TTL |
 | `pin` | False | ask the node to pin uploads |
 | `redundancy` | 2 | erasure-coding level 0–4; **must be 0 with `local_store`** |
+| `encrypt` | False | node-side encryption for every write (files and manifest nodes); refs become 128-hex (address + key). A lineage never mixes; incompatible with `local_store` and refused by `verify` |
 | `allow_gateway` | False | explicit opt-in for a non-owned endpoint |
 | `verify` | None | BMT-verify fetched chunks; auto: on for gateways, off for own node |
 | `local_store` | None | path (or `LocalStore`) — local-first mode: offline commits, background push, local-first reads |

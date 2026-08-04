@@ -60,7 +60,7 @@ fs.download(f"bzz://{ref}", "dataset-copy/", recursive=True)
 ```
 
 `upload` accepts `content_type=` (otherwise guessed from the filename),
-`encrypt=True` (single files; the returned 128-hex reference includes the
+`encrypt=True` (files **and** directories; the returned 128-hex reference includes the
 decryption key), and `redundancy=0–4` (erasure coding, default 2). The stamp
 is validated before any byte moves, so a missing or expired stamp fails
 immediately with an actionable error.

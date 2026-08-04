@@ -341,7 +341,28 @@ nothing evicts against a dying batch.
       `_ListingBackend` impl behind the existing capability seam. No API change. Revisit the
       v0/v1 design if the issue progresses — it makes listing and writes materially cheaper.
 - [ ] Server-side mutation endpoint support (same seam, write side).
-- [ ] Encrypted references (128-hex) — decryption in the load path.
+- [x] Encrypted references (128-hex) — storage and recall (2026-08-04).
+      Storage: `encrypt` as a storage option (and per-`upload` flag, now
+      covering directories — the old single-file NotImplementedError is
+      gone): every blob, file payloads and manifest nodes alike, goes up
+      with `swarm-encrypt`; refs become address ‖ key. **The Mantaray
+      codec needed zero changes** — refBytesSize was data-driven all
+      along, so 64-byte entries flow through build/parse untouched.
+      Recall: the node decrypts in the load path given the full
+      reference, so listing walks and ranged reads work unchanged against
+      a trusted node. Honest boundaries, enforced: a lineage never mixes
+      encrypted/plain (one refBytesSize per node — patching across the
+      boundary is refused with a clear error); `local_store` refuses
+      (encrypted refs are not content addresses, the journal cannot hold
+      them); the verifying reader refuses 128-hex refs loudly (it cannot
+      traverse ciphertext — client-side decryption would be the future
+      unlock for verified encrypted reads, deliberately not attempted).
+      Offline suite green incl. the swarm-encrypt-faithful FakeClient;
+      **live validation pending** (the local node was down at
+      implementation time): `test_live_encrypted_roundtrip` is gated and
+      ready — it settles whether `/bytes/<128-hex>` decrypts server-side
+      on Bee 2.8.1, and bzzf feeds pointing at encrypted roots remain
+      untested.
 - [ ] ACT-protected content (pass the `swarm-act-*` headers through).
 - [x] Redundancy level as a write option (erasure coding): `redundancy=0..4` storage
       option (default **2**; 0 disables, None = node default), passed as

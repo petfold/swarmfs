@@ -60,12 +60,14 @@ class CommitEngine:
         concurrency: int = 8,
         pin: bool = False,
         redundancy: int | None = None,
+        encrypt: bool = False,
     ):
         self.client = client
         self.stamps = stamps
         self.concurrency = concurrency
         self.pin = pin
         self.redundancy = redundancy
+        self.encrypt = encrypt
 
     async def commit(
         self,
@@ -81,6 +83,15 @@ class CommitEngine:
         removes = sorted(removes)
         if not writes and not removes:
             raise ValueError("nothing staged to commit")
+        if root is not None and self.encrypt != (len(root) == 128):
+            # A lineage is encrypted or it isn't: manifest nodes carry ONE
+            # refBytesSize, so a 64-byte (encrypted) child ref cannot live
+            # in a 32-byte-ref parent, or vice versa.
+            raise ValueError(
+                "encrypt=%s but the manifest %s… is %sencrypted — a "
+                "lineage cannot mix; publish a fresh manifest instead"
+                % (self.encrypt, root[:8],
+                   "" if len(root) == 128 else "un"))
         batch = await self.stamps.resolve(stamp)
 
         sem = asyncio.Semaphore(self.concurrency)
@@ -88,7 +99,8 @@ class CommitEngine:
         async def upload(path: str, sw: StagedWrite) -> tuple[str, str]:
             async with sem:
                 ref = await self.client.bytes_post(
-                    sw.payload(), batch, pin=self.pin, redundancy=self.redundancy
+                    sw.payload(), batch, pin=self.pin,
+                    redundancy=self.redundancy, encrypt=self.encrypt
                 )
             return path, ref
 
@@ -114,7 +126,8 @@ class CommitEngine:
             # trees, but the header is harmless and keeps behavior uniform
             return bytes.fromhex(
                 await self.client.bytes_post(
-                    data, batch, pin=self.pin, redundancy=self.redundancy
+                    data, batch, pin=self.pin,
+                    redundancy=self.redundancy, encrypt=self.encrypt
                 )
             )
 

@@ -66,8 +66,12 @@ def test_upload_directory(ufs, tmp_path):
     # the directory path goes through the commit engine
     assert len(fs.commit_log) == 1 and fs.commit_log[0].new_root == ref
 
-    with pytest.raises(NotImplementedError, match="encrypt"):
-        fs.upload(str(tmp_path / "dataset"), encrypt=True)
+    # encrypted directory uploads work since the encrypted-storage work
+    # (the old NotImplementedError is gone): manifest and payloads all go
+    # up encrypted, the root is a 128-hex reference
+    enc_ref = fs.upload(str(tmp_path / "dataset"), encrypt=True)
+    assert len(enc_ref) == 128
+    assert fs.cat_file(f"bzz://{enc_ref}/a.csv") == b"a,b\n1,2\n"
 
 
 def test_upload_fails_early_without_stamp(tmp_path):
