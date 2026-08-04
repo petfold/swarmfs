@@ -192,6 +192,7 @@ class LocalStore:
         self._cond = threading.Condition(self._mutex)
         self._listeners: List[Callable[[dict], None]] = []
         # Fold of the journal (authoritative) …
+        self._latest_root: Optional[str] = None
         self._roots: Dict[str, RootState] = {}
         self._remote_roots: Dict[str, str] = {}
         self._pins: Dict[str, Set[str]] = {}
@@ -320,6 +321,7 @@ class LocalStore:
             )
             for ref in self._roots[root].blobs:
                 self._blob_roots.setdefault(ref, []).append(root)
+            self._latest_root = root
         elif ev in ("pushed", "confirmed"):
             state = self._roots.get(event["root"])
             if state is None:
@@ -354,6 +356,8 @@ class LocalStore:
         }
         self._remote_roots = dict(state.get("remote_roots", {}))
         self._pins = {n: set(r) for n, r in state.get("pins", {}).items()}
+        self._latest_root = state.get("latest_root") or (
+            next(reversed(self._roots)) if self._roots else None)
         self._blob_roots = {}
         for root, s in self._roots.items():
             for ref in s.blobs:
@@ -565,6 +569,17 @@ class LocalStore:
             if state is None:
                 raise KeyError(root)
             return state.parent
+
+    def has_root(self, root: str) -> bool:
+        with self._mutex:
+            return root in self._roots
+
+    def latest_root(self) -> Optional[str]:
+        """The most recently committed root — what an application should
+        open at (the journal is the pointer: lineage lives here, not in a
+        separate ref file)."""
+        with self._mutex:
+            return self._latest_root
 
     def wait_for(self, root: Optional[str] = None, rung: str = CONFIRMED,
                  timeout: Optional[float] = None) -> bool:
