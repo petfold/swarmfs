@@ -1,5 +1,10 @@
 # swarmfs user guide
 
+*(This is the tutorial — it teaches by doing. To look something up — a
+storage option, a signature, an error — use the compact
+[`REFERENCE.md`](REFERENCE.md), which is pinned against the code by the
+test suite.)*
+
 This is the long-form companion to the [README](../README.md). The README is a
 quick reference; this guide walks through *why* things work the way they do
 and gives a runnable example for every major library in the Python data

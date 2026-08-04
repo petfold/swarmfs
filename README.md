@@ -19,10 +19,13 @@ mode, `fs.sync()` is the certainty barrier. See the
 [roadmap](docs/roadmap.md) and the local-first design in
 [docs/localstore-design.md](docs/localstore-design.md).
 
-New to swarmfs? This README is a quick reference — the
+New to swarmfs? This README is the quick tour — the
 **[User Guide](docs/USER_GUIDE.md)** walks through a worked example for every
 library above (pandas, all three Dask collection types, Zarr, xarray,
 PyArrow, DuckDB) and explains the content-addressing model in plain terms.
+For lookup — a storage option, a signature, an error, a default — use the
+**[Reference](docs/REFERENCE.md)**: definition-first tables, pinned against
+the code by the test suite, and the right document to hand to an AI agent.
 
 ## Install
 

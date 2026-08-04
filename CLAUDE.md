@@ -386,6 +386,12 @@ gateway selection/fallback (see next section).
   contains `LICENSE` and never contains `.claude/` — a direct regression
   guard for the packaging leak caught before the `0.1.0` release (see the
   git history around the `LICENSE`/packaging-fixes commit).
+- **Docs before publishing** (Peter's standing rule, all repos): a release
+  starts with a docs sweep, not ends with one — README status/features,
+  User Guide, `docs/REFERENCE.md` (its "version this file describes" line
+  is test-pinned to pyproject, so a bump without the sweep fails the
+  suite), roadmap, this file's version narrative, CHANGELOG where one
+  exists, and the shared onboarding guide.
 - **Publish**: `.github/workflows/publish.yml` triggers on pushing a `v*` tag
   (uniform across the stack; it no longer waits for a GitHub Release), re-runs
   tests, builds, and publishes via PyPI trusted publishing (OIDC — no stored
