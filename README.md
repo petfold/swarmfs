@@ -11,9 +11,13 @@ HTTP API. Installing it makes Swarm a first-class storage backend for the
 Python data ecosystem — pandas, dask, zarr, xarray, pyarrow, DuckDB — via
 URLs like `bzz://<reference>/path/to/file.parquet`.
 
-**Status: v2.** Read-only `bzz://` access, transactional copy-on-write
-writes (postage stamps, every commit a snapshot), and mutable feed-backed
-`bzzf://` mounts. See the [roadmap](docs/roadmap.md).
+**Status: v3.** Read-only `bzz://` access, transactional copy-on-write
+writes (postage stamps, every commit a snapshot), mutable feed-backed
+`bzzf://` mounts, and a **local-first mode**: commits land on local disk
+instantly and sync to Swarm in the background — offline is the normal
+mode, `fs.sync()` is the certainty barrier. See the
+[roadmap](docs/roadmap.md) and the local-first design in
+[docs/localstore-design.md](docs/localstore-design.md).
 
 New to swarmfs? This README is a quick reference — the
 **[User Guide](docs/USER_GUIDE.md)** walks through a worked example for every
@@ -102,6 +106,32 @@ with fs.transaction:
     fs.pipe_file("bzz://new/dataset/b.parquet", data_b)
 root = fs.latest("new")          # share this reference; it never changes
 ```
+
+## Local-first writes
+
+Add `local_store=` and the network leaves the write path entirely: commits
+land in a local store directory instantly — they work on a plane — and a
+background worker pushes them to Swarm and *confirms* arrival peer-to-peer.
+Reads of anything the store holds are served from disk too (offline
+read-your-writes, including `ls` and ranged reads); foreign references
+still read through the node.
+
+```python
+fs = fsspec.filesystem("bzz", local_store="~/.myapp/store", redundancy=0)
+with fs.transaction:
+    fs.pipe_file("bzz://new/dataset/a.parquet", data_a)   # instant, offline-safe
+root = fs.latest("new")
+fs.sync()                        # optional barrier: confirmed ON the network
+print(fs.sync_status())          # pinned vs evictable bytes, batch expiries
+```
+
+No postage stamp is needed at commit time (the push owns postage), local
+disk becomes a budgeted working set (unpushed data is pinned; only
+Swarm-confirmed blobs evict, and evicted reads heal by verified re-fetch),
+and on `bzzf://` mounts the feed update publishes only once the network
+provably serves the new root. `redundancy=0` is required — erasure coding
+would fork the node's references from the local address space. Full design:
+[docs/localstore-design.md](docs/localstore-design.md).
 
 ## Mutable feeds (`bzzf://`)
 

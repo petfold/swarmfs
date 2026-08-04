@@ -385,6 +385,18 @@ completely untouched — it's a new manifest, not an edit of the old one.
 That means every commit doubles as a free snapshot: keep the old reference
 around and you have a permanent before-picture, with no extra bookkeeping.
 
+**Writing without the network (local-first).** Pass
+`local_store="~/.myapp/store", redundancy=0` when you create the
+filesystem, and commits stop touching the network at all: they land in the
+local store directory instantly (no postage stamp needed at commit time)
+and a background worker uploads and *confirms* them on Swarm afterwards.
+You can write a dataset on a plane, read every bit of it back — `ls`,
+ranged reads, the lot — and let it sync when you land; `fs.sync()` blocks
+until everything is provably on the network, `fs.sync_status()` shows how
+far along it is. The [README](../README.md#local-first-writes) has the
+short version; the full design is in
+[localstore-design.md](localstore-design.md).
+
 ## Getting a stable URL: feeds
 
 Everything above produces a new reference every time you write. That's
