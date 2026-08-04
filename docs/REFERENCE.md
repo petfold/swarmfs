@@ -169,7 +169,25 @@ Confirmation is p2p-native: Bee's stewardship check retrieves every chunk
 through the retrieval protocol from remote peers (verified from the Bee
 source) — node claims alone promote no further than *pushed*.
 
-## 9. Errors
+## 9. Feeds (`swarmfs.feeds`)
+
+The single-owner-chunk / feed primitives behind `bzzf://` — a supported
+surface: swarmlite builds its snapshot history and publish path on it
+(needs the `feeds` extra).
+
+| name | signature | semantics |
+|---|---|---|
+| `feeds.FeedSigner` | `(private_key)` | the owner's key; signs feed updates (`.owner` / `.owner_hex`). |
+| `feeds.FeedOps` | `(client)` | feed operations over a `SwarmClient` — `update(signer, topic, index, ref, stamp)` publishes one signed update. |
+| `feeds.owner_bytes` | `(owner)` | 40-hex owner address → bytes (0x tolerated). |
+| `feeds.topic_bytes` | `(topic)` | human topic string (keccak'd, bee-js convention) or raw 64-hex → bytes. |
+| `feeds.feed_identifier` | `(topic, index)` | the SOC identifier of update `index` of a sequence feed. |
+| `feeds.soc_address` | `(identifier, owner)` | the address the single-owner chunk lives at. |
+| `feeds.verify_soc` | `(data, owner, address)` | full SOC verification: address recomputation + owner-signature recovery; raises `FeedError`. |
+| `feeds.SOC_PAYLOAD_OFFSET` | constant (`105`) | where the payload starts inside a raw SOC. |
+| `feeds.FeedError` | exception (`RuntimeError`) | malformed/misowned feed data, missing signer, bad SOC. |
+
+## 10. Errors
 
 | raised | when |
 |---|---|
