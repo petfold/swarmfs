@@ -297,6 +297,40 @@ Gray zone, to be settled by implementation rather than upfront: how much of
 the "mutable ref + history" machinery (recordstore's `Pointer`, bzzf feed
 mounts) can share a ref-journal utility.
 
+## Performance posture
+
+The remaining phases mostly *remove* latency: reads become local disk
+instead of network round trips, `commit()` stops touching the network and
+postage entirely, and the L2 caches are pure speedup. Two defaults already
+guarantee zero overhead for users who opt into nothing: with
+`max_bytes=None` there is no budget enforcement and no eviction scanning at
+all, and the push worker is background — nothing it does sits on the
+commit path (`sync()` blocks only whoever calls it). The honest exceptions,
+each with its knob:
+
+- **fsync policy (L2, the one real hidden cost).** L0's `put()` fsyncs
+  every blob file; a recordstore commit writes hundreds of small trie
+  nodes, so that is hundreds of serial fsyncs — still far cheaper than
+  today's per-blob HTTP uploads, but *slower than plain `DirBytesStore`*,
+  which never fsyncs. Durability only requires that a commit's blobs are on
+  disk before the journal's `committed` event claims them, so the default
+  becomes **one barrier at the commit boundary** (fsync the new blob files,
+  then the event — same safety, batched), with `durability="blob"` for
+  paranoid per-blob and `durability="os"` for no-fsync throughput. The
+  unsafe mode must stay honest: without ordering guarantees the journal
+  could over-claim after a crash, so opening a store in (or after) `"os"`
+  mode heals by checking that unconfirmed roots' blobs exist and demoting
+  loudly when they don't.
+- **Push bandwidth.** The worker shares the link with foreground
+  re-fetches; its concurrency/rate is a knob, and confirmation sampling is
+  already one (see *Verification and trust*).
+- **The fold's scale cliff.** Eviction scans and `status()` iterate all
+  local blobs in memory — fine to roughly 10⁵–10⁶ blobs. The disposable
+  index tier (SQLite) is the designed escape hatch; the trigger for
+  actually building it is a measured eviction or open-time cost, not
+  speculation. `status()` stays an on-demand diagnostic, never called on
+  hot paths.
+
 ## Concurrency and open questions
 
 - **Single writer per store in v1**, enforced by a lock file. Immutable blob
@@ -334,7 +368,10 @@ mounts) can share a ref-journal utility.
   re-pushes idempotently; live test against a real Bee.*
 - **L2 — recordstore adoption.** See recordstore's ROADMAP (Local-first
   track): its local/Bee stores become adapters over `localstore`; the journal
-  becomes its reflog; push/pull verbs on `RecordStore`.
+  becomes its reflog; push/pull verbs on `RecordStore`. Includes the
+  commit-boundary fsync batching and `durability=` knob (see *Performance
+  posture*) — the acceptance bar is that a localstore-backed commit is not
+  meaningfully slower than `DirBytesStore` at its default durability.
 - **L3 — swarmfs write-path adoption.** The commit engine's spool becomes a
   `localstore`; transactional commits become local-first with background
   push; `bzzf` feed update rides the same ladder.

@@ -229,8 +229,14 @@ nothing evicts against a dying batch.
       *Verification and trust*): verified re-fetch of evicted blobs, the
       push ref-equality assertion (erasure-coding drift tripwire), and
       sampled retrieve-and-verify behind the network-confirmed rung —
-      node claims alone promote no further than on-node.
+      node claims alone promote no further than on-node. The worker's
+      concurrency/rate is a knob (it shares the link with foreground
+      re-fetches); nothing it does sits on the commit path.
 - [ ] **L2 — recordstore adoption** (tracked in recordstore's ROADMAP).
+      Includes commit-boundary fsync batching + the `durability=` knob —
+      L0 fsyncs per blob, which a many-small-node recordstore commit
+      would feel; the acceptance bar is parity with `DirBytesStore`
+      (design doc, *Performance posture*).
 - [ ] **L3 — swarmfs write-path adoption**: commit-engine spool →
       localstore; transactional commits become local-first; bzzf feed
       updates ride the ladder.
