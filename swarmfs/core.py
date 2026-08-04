@@ -64,7 +64,14 @@ class SwarmTransaction(Transaction):
             fs.discard_staged()
         fs._intrans = False
         fs._transaction = None
-        self.fs = None
+        # Deliberately NOT `self.fs = None`: fsspec < 2024.3.0's
+        # Transaction.__exit__ touches self.fs unconditionally after
+        # complete() (the `if self.fs:` guard arrived in 2024.3.0), so
+        # clearing it here crashed every transaction exit for users on
+        # the nine months of fsspec releases our floor claims to support.
+        # Leaving it set is harmless on both generations: old __exit__
+        # re-clears two already-cleared attributes, new __exit__ clears
+        # fs itself.
 
 
 class LocalFirstReader:

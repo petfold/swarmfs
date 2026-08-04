@@ -152,15 +152,13 @@ def test_fs_requires_redundancy_off(tmp_path):
 
 
 def test_fs_writes_commit_offline_then_sync(tmp_path):
-    # autocommit writes (the distro fsspec's Transaction.__exit__ is
-    # broken in this environment — the same known issue as test_write_fs;
-    # the engine path is identical either way)
     store = {}
     fs = SwarmFileSystem(client=BMTFakeClient(store),
                          local_store=str(tmp_path / "s"),
                          redundancy=0, skip_instance_cache=True)
-    fs.pipe_file("bzz://new/a.txt", b"alpha")
-    fs.pipe_file(f"bzz://{fs.latest('new')}/dir/b.txt", b"beta")
+    with fs.transaction:
+        fs.pipe_file("bzz://new/a.txt", b"alpha")
+        fs.pipe_file("bzz://new/dir/b.txt", b"beta")
     root = fs.latest("new")
     assert fs._local.has_root(root)                  # committed locally
     fs.sync(timeout=WAIT)                            # pushed + confirmed
