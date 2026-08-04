@@ -414,6 +414,19 @@ each with its knob:
   files make concurrent reads trivially safe; POSIX unlink semantics mostly
   protect a reader racing an eviction, Windows does not — multi-process
   writing is explicitly out of v1 scope and honestly documented.
+  *Multi-process pattern, settled 2026-08-04 with ontodag/ontodag-fs —
+  two layers, kept distinct: (1) writer **coordination** is the
+  application's merge (ontodag's commutative idempotent DAG merge; a
+  save onto a moved head folds the head in before committing; separate
+  replicas converge through Swarm) — never the lock; (2) the flock is
+  one directory's journal **hygiene**, and applications that hydrate
+  into memory need the handle only during hydrate and commit, so they
+  open transient windows and hold the lock for milliseconds, retrying
+  briefly on `StoreLocked` overlap. A read-only open mode and a
+  journal-refresh API were considered for long-lived readers and
+  rejected as unnecessary under this pattern; revisit only if a
+  consumer must serve reads from the store itself rather than from a
+  hydrated view.*
 - Journal compaction across the pinned-index boundary needs care (spec'd, per
   above).
 - History retention vs. push-latest-only: old roots that were never pushed
