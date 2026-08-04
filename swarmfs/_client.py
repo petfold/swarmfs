@@ -138,6 +138,23 @@ class SwarmClient:
         Returns None if neither works (e.g. a restrictive gateway).
         """
         session = await self._get_session()
+        if len(ref) == 128:
+            # Encrypted reference: the root chunk's span bytes are
+            # ciphertext (meaningless client-side) and HEAD /bytes 404s on
+            # encrypted refs (measured on Bee 2.8.1) — but a 1-byte ranged
+            # GET decrypts and Content-Range carries the plaintext total.
+            url = f"{self.api_url}/bytes/{ref}"
+            headers = {"Range": "bytes=0-0"}
+            async with session.get(url, headers=headers) as resp:
+                await self._raise_for_status(resp, url)
+                await resp.read()
+                content_range = resp.headers.get("Content-Range", "")
+                if "/" in content_range:
+                    try:
+                        return int(content_range.rsplit("/", 1)[1])
+                    except ValueError:
+                        pass
+            return None
         try:
             async with session.get(f"{self.api_url}/chunks/{ref}") as resp:
                 if resp.status < 400:

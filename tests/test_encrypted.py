@@ -124,6 +124,10 @@ def test_live_encrypted_roundtrip(tmp_path):
     assert reader.cat(f"bzz://{root}/a.txt") == b"alpha " * 10
     assert reader.cat_file(f"bzz://{root}/sub/b.txt",
                            start=0, end=4) == b"beta"
+    # size of encrypted content: HEAD /bytes 404s and the root chunk's
+    # span is ciphertext (both measured on 2.8.1) — bytes_size answers
+    # via a 1-byte ranged GET's Content-Range instead
+    assert reader.info(f"bzz://{root}/a.txt")["size"] == 60
 
 
 @pytest.mark.skipif(not (BEE and STAMP),
