@@ -8,7 +8,7 @@ local-first design in [localstore-design.md](localstore-design.md) and its
 Tables here are pinned against the code by `tests/test_reference.py` — if a
 name or parameter in this file and the code disagree, the suite fails.
 
-Package version this file describes: `0.8.0`.
+Package version this file describes: `0.9.0`.
 
 ## 1. Vocabulary
 
