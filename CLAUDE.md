@@ -361,7 +361,7 @@ gateway selection/fallback (see next section).
 
 ## Packaging & CI (decided, implemented)
 
-- **Version**: `0.7.0` (L3+L4: the fs's own write path goes local-first —
+- **Version**: `0.7.1` (docs: the test-pinned REFERENCE.md + v3 README/User Guide catch-up; `0.7.0` was L3+L4: the fs's own write path goes local-first —
   `SwarmFileSystem(local_store=..., redundancy=0)`, `LocalFirstCommitEngine`,
   local-first reads for known refs (offline read-your-writes), bzzf
   publish-after-confirmation, `scrub()`, `StoreStatus.batch_expiries` — plus
