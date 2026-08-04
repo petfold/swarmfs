@@ -438,3 +438,87 @@ def test_blob_durability_mode_unchanged(tmp_path):
 def test_unknown_durability_rejected(tmp_path):
     with pytest.raises(ValueError, match="durability"):
         make_store(tmp_path, durability="yolo")
+
+
+# -- rebase (app-assisted squash) + orphan GC ---------------------------------------
+
+
+def test_rebase_collapses_lineage_and_gc_frees_dropped_blobs(tmp_path):
+    with make_store(tmp_path) as s:
+        a = s.put(blob("a"))
+        s.commit_root(a, None, [a])
+        b = s.put(blob("b"))          # will be dropped by the squash
+        s.commit_root(b, a, [b])
+        c = s.put(blob("c"))
+        s.commit_root(c, b, [c])
+        # the app says: c's full reachable set is {a, c} (b was overwritten)
+        s.rebase_root(c, [a, c], structure=[a])
+        st = s.status()
+        assert set(st.roots) == {c}
+        assert s.parent_of(c) is None
+        assert s.latest_root() == c
+        count, freed = s.gc_orphans()
+        assert count == 1 and freed == 60   # exactly b
+        assert not s.has_local(b)
+        assert s.get(a) and s.get(c)        # kept blobs intact
+
+
+def test_rebase_survives_reopen(tmp_path):
+    s = make_store(tmp_path)
+    a = s.put(blob("a"))
+    s.commit_root(a, None, [a])
+    s.mark_confirmed(a, batch="b1", ttl=1e9)
+    b = s.put(blob("b"))
+    s.commit_root(b, a, [b])
+    s.rebase_root(b, [a, b])
+    s.close()
+    with make_store(tmp_path) as s2:   # replay: committed events then rebase
+        st = s2.status()
+        assert set(st.roots) == {b}
+        assert s2.latest_root() == b
+        assert st.roots[b] == "committed"  # b's own rung survived, not a's
+
+
+def test_rebase_preserves_durability_facts(tmp_path):
+    with make_store(tmp_path) as s:
+        a = s.put(blob("a"))
+        s.commit_root(a, None, [a])
+        s.mark_confirmed(a, batch="b9", ttl=5e8)
+        s.rebase_root(a, [a])
+        assert s.network_confirmed(a)      # rung survived the rebase
+
+
+def test_rebase_refuses_to_lose_a_blob(tmp_path):
+    with make_store(tmp_path) as s:
+        a = s.put(blob("a"))
+        s.commit_root(a, None, [a])
+        with pytest.raises(ValueError, match="lose it"):
+            s.rebase_root(a, [a, "ee" * 32])  # neither local nor on Swarm
+
+
+def test_rebase_accepts_evicted_but_confirmed_blobs(tmp_path):
+    with make_store(tmp_path, max_bytes=100) as s:
+        a = s.put(blob("a"))
+        s.commit_root(a, None, [a])
+        s.mark_confirmed(a, ttl=None)
+        s.evict(100)
+        assert not s.has_local(a)          # on Swarm only
+        s.rebase_root(a, [a])              # allowed: Swarm holds it
+        assert s.status().only_on_swarm_count == 1
+
+
+def test_gc_spares_session_staging(tmp_path):
+    with make_store(tmp_path) as s:
+        staged = s.put(blob("staged"))     # a commit in progress
+        assert s.gc_orphans() == (0, 0)
+        assert s.has_local(staged)
+
+
+def test_gc_collects_crashed_session_orphans(tmp_path):
+    s = make_store(tmp_path)
+    orphan = s.put(blob("orphan"))
+    s.close()                              # "crash": never committed
+    with make_store(tmp_path) as s2:
+        count, freed = s2.gc_orphans()
+        assert count == 1 and freed == 60
+        assert not s2.has_local(orphan)

@@ -119,6 +119,22 @@ Named pins: the listed blobs are exempt from eviction while the pin stands.
 A later `pin` with the same name replaces the earlier ref list.
 
 ```jsonc
+{"ev": "rebased", "root": "<ref>", "blobs": ["<ref>", …],
+ "structure": ["<ref>", …]?, "bytes": N?, "ts": T}
+```
+History retention (app-assisted squash): the lineage collapses onto
+`root`, whose `blobs` list is its **full reachable set** — supplied by the
+application, which unlike this layer can walk its own blob structure. On
+fold, every other root is dropped (parent becomes null, `root`'s
+durability rung and batch facts survive from its earlier events), and
+blobs listed only by dropped roots become orphans, deletable by garbage
+collection. A writer MUST refuse to append this event if any listed blob
+is neither locally present nor listed by a confirmed root, since dropping
+the older events would otherwise lose the last copy. Readers that do not
+know this event ignore it (the general unknown-`ev` rule), which errs in
+the safe direction: dropped roots stay pinned.
+
+```jsonc
 {"ev": "snapshot", "state": {…}, "ts": T}
 ```
 Compaction: `state` is the full fold of every event before this line

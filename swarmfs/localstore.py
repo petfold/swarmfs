@@ -143,6 +143,7 @@ class LocalStore:
         self.durability = durability
         self._session_written: Set[str] = set()  # written this session
         self._session_synced: Set[str] = set()   # …and fsynced
+        self._session_listed: Set[str] = set()   # …and listed by an event
         #: Optional network heal: called with a ref when `get` finds the blob
         #: evicted; must return the bytes (a Syncer wires this to its remote).
         self.fetcher = fetcher
@@ -321,6 +322,7 @@ class LocalStore:
             )
             for ref in self._roots[root].blobs:
                 self._blob_roots.setdefault(ref, []).append(root)
+                self._session_listed.add(ref)
             self._latest_root = root
         elif ev in ("pushed", "confirmed"):
             state = self._roots.get(event["root"])
@@ -333,6 +335,25 @@ class LocalStore:
                 state.batch = event.get("batch")
                 state.ttl = event.get("ttl")
                 state.confirmed_ts = event.get("ts")
+        elif ev == "rebased":
+            root = event["root"]
+            prev = self._roots.get(root)
+            self._roots = {root: RootState(
+                parent=None,
+                blobs=list(event.get("blobs", [])),
+                structure=set(event.get("structure", [])),
+                rung=prev.rung if prev else COMMITTED,
+                batch=prev.batch if prev else None,
+                ttl=prev.ttl if prev else None,
+                confirmed_ts=prev.confirmed_ts if prev else None,
+                committed_ts=(prev.committed_ts if prev
+                              else event.get("ts")),
+            )}
+            self._blob_roots = {}
+            for ref in self._roots[root].blobs:
+                self._blob_roots.setdefault(ref, []).append(root)
+                self._session_listed.add(ref)
+            self._latest_root = root
         elif ev == "remote-root":
             self._remote_roots[event["remote"]] = event["root"]
         elif ev == "pin":
@@ -398,6 +419,12 @@ class LocalStore:
         dirs = set()
         for ref in refs:
             if ref in self._session_synced:
+                continue
+            if ref in self._blob_roots:
+                # Already listed by a committed event, so already made
+                # durable by that event's barrier — shared blobs and
+                # rebase lists skip the redundant fsync.
+                self._session_synced.add(ref)
                 continue
             path = self._blob_path(ref)
             if ref not in self._session_written and \
@@ -646,6 +673,67 @@ class LocalStore:
                 "unconfirmed": sum(1 for s in self._roots.values()
                                    if s.rung != CONFIRMED),
             }
+
+    def rebase_root(self, root: str, blobs: Iterable[str],
+                    structure: Iterable[str] = ()) -> None:
+        """Collapse the journal's lineage onto `root`, whose `blobs` list
+        must be its FULL reachable set — the *application* computes it,
+        because this layer is blob-blind: a blob the tip still references
+        may be listed only in an ancestor's event (the same fact that made
+        push-latest-only impossible for the worker at L1; squash is the
+        app-assisted version). Every other root leaves the fold; their
+        exclusive blobs become orphans (`gc_orphans` deletes them).
+        Durability facts for `root` — rung, batch, TTL — survive: they are
+        still true. Each listed blob must be locally present or listed by
+        a confirmed root (on Swarm); otherwise dropping the old events
+        would lose it, and this refuses instead."""
+        blobs = list(blobs)
+        structure = set(structure)
+        with self._mutex:
+            if root not in self._roots:
+                raise ValueError(f"unknown root {root[:8]}…")
+            if not structure <= set(blobs):
+                raise ValueError("structure refs must be a subset of blobs")
+            for b in blobs:
+                if b in self._local:
+                    continue
+                listing = self._blob_roots.get(b, [])
+                if not any(self._roots[r].rung == CONFIRMED
+                           for r in listing):
+                    raise ValueError(
+                        f"blob {b[:16]}… is neither local nor on Swarm — "
+                        "rebasing would lose it")
+            self._sync_blobs([b for b in blobs if b in self._local])
+            self._append({
+                "ev": "rebased", "root": root, "blobs": blobs,
+                "structure": sorted(structure),
+                "bytes": sum(self._local.get(b, 0) for b in blobs),
+            })
+
+    def gc_orphans(self) -> Tuple[int, int]:
+        """Delete local blob files that no committed root lists and no
+        named pin holds — the debris a rebase leaves (dropped history's
+        exclusive blobs) and torn leftovers of crashed sessions. Blobs
+        written *this* session but not yet committed are spared: they may
+        be a commit in progress. (A blob committed and later dropped by a
+        rebase is fair game — "ever listed by an event" is what separates
+        staging from debris.) Returns ``(count, bytes_freed)``."""
+        with self._mutex:
+            pinned = set()
+            for refs in self._pins.values():
+                pinned |= refs
+            staging = self._session_written - self._session_listed
+            victims = [r for r in self._local
+                       if r not in self._blob_roots and r not in pinned
+                       and r not in staging]
+            freed = 0
+            for ref in victims:
+                try:
+                    os.unlink(self._blob_path(ref))
+                except FileNotFoundError:
+                    pass
+                freed += self._local.pop(ref, 0)
+            return len(victims), freed
 
     def pin(self, name: str, refs: Iterable[str]) -> None:
         """Hold the listed blobs against eviction under `name` (working-set
