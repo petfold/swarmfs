@@ -236,7 +236,16 @@ nothing evicts against a dying batch.
       number of uploaded blobs recovers by idempotent re-push with the
       journal under-claiming throughout; wrong fetched bytes and
       stewardship refusals block confirmation (root stays at *pushed*).
-      Live Bee validation is gated (`SWARMFS_TEST_BEE`) and still owed.
+      Live-validated against Bee 2.8.1 (2026-08-04): real uploads held the
+      ref-equality assertion (local BMT ref == node reference, erasure
+      coding off), `stewardship_get` works as wired, retrieve-and-verify
+      passed on real fetches, batch TTL recorded (34-day batch), and
+      evict-then-heal round-tripped through the node. One caveat stays
+      open: with a single local node, fetch and stewardship plausibly
+      answer from the node's own store, so whether *network-confirmed*
+      truly exercises the network path needs a second node or gateway —
+      revisit before trusting eviction on data that only ever touched one
+      node.
       *Findings pinned:*
       1. **Push-latest-only cannot be a worker behavior** (design doc
          corrected in three places): a blob-blind layer must push every
