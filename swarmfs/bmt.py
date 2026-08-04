@@ -5,7 +5,7 @@ binary Merkle tree over the 32-byte segments of the payload, zero-padded to
 4096 bytes. Needed client-side for single-owner chunks (feed updates sign the
 wrapped chunk's address) and, later, for opt-in chunk verification.
 
-Requires the ``feeds`` extra (``pip install swarmfs[feeds]``) for keccak256.
+keccak256 comes from eth-hash[pycryptodome], a base dependency since 0.9.
 """
 
 from __future__ import annotations
@@ -23,7 +23,9 @@ except ImportError:  # pragma: no cover
 
     def keccak256(data: bytes) -> bytes:
         raise ImportError(
-            "keccak256 requires the 'feeds' extra: pip install 'swarmfs[feeds]'"
+            "keccak256 requires eth-hash[pycryptodome] — a base dependency "
+            "since swarmfs 0.9; this install is missing it (reinstall "
+            "swarmfs, or pip install 'eth-hash[pycryptodome]')"
         )
 
 

@@ -172,9 +172,10 @@ class LocalStore:
             except ImportError as e:
                 raise ImportError(
                     'addressing="swarm" needs the BMT splitter: '
-                    'pip install "swarmfs[feeds]" (or open the store with '
-                    'addressing="sha256", losing Swarm address-space '
-                    "compatibility)") from e
+                    'eth-hash[pycryptodome] is missing (a base dependency '
+                    'since swarmfs 0.9 — reinstall swarmfs, or open the '
+                    'store with addressing="sha256", losing Swarm '
+                    "address-space compatibility)") from e
             self._address = lambda data: content_address(data).hex()
         else:
             self._address = lambda data: hashlib.sha256(data).hexdigest()

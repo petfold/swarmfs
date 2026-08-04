@@ -25,8 +25,8 @@ __all__ = [
 
 
 def __getattr__(name):
-    # The splitter needs keccak256 (the `feeds` extra); import it on use so a
-    # plain install stays importable. The module is `splitter`, not `split`, so
+    # keccak (eth-hash) is a base dependency since 0.9, but the lazy hook
+    # stays: it keeps `import swarmfs` working even on a broken install. The module is `splitter`, not `split`, so
     # importing it can never shadow the `split` function it exports (and
     # `from . import split` here would recurse into this very hook).
     if name in ("split", "content_address"):

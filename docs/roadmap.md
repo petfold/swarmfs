@@ -333,6 +333,20 @@ nothing evicts against a dying batch.
             expiry among the roots it covers; THE number to watch once
             local is partial (expired batch + evicted blob = loss).
 
+## Dependency split: keccak into base (2026-08-04)
+
+- [x] `eth-hash[pycryptodome]` moved from the `feeds` extra into base
+      dependencies; the extra is now exactly `eth-keys` (feed signing +
+      signature verification — the genuinely optional part, and the
+      heavier transitive tree). Why: keccak became load-bearing far
+      beyond feeds — chunk verification (auto-ON for gateways: a plain
+      install crashed with an ImportError naming the wrong extra on its
+      first gateway read), the splitter, the local-first store's default
+      addressing, encrypted-sizing arithmetic. Proven in a clean venv:
+      base install runs BMT/local-first/verification, signing gates with
+      an accurate message. Error messages and docs that named the
+      `feeds` extra for keccak-related failures are corrected.
+
 ## Later / opportunistic
 
 - [ ] Server-side listing endpoint support: when the upstream endpoint (ethersphere/bee#5535,

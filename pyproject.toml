@@ -23,12 +23,23 @@ classifiers = [
 dependencies = [
     "fsspec>=2023.6.0",
     "aiohttp>=3.8",
+    # keccak for BMT — load-bearing far beyond feeds: chunk verification
+    # (auto-ON for gateways), the splitter (offline addressing, exact
+    # batch sizing), the local-first store's swarm addressing, SOC
+    # parsing. eth-hash itself has zero deps; pycryptodome is the small,
+    # universally-wheeled backend. Moved here from the [feeds] extra in
+    # 0.9 — before that, a plain install crashed on first gateway read.
+    "eth-hash[pycryptodome]>=0.5",
 ]
 
 [project.optional-dependencies]
+# feed *signing* (writing) — the one genuinely optional capability, and
+# the one carrying the heavier transitive tree (eth-utils, cytoolz).
+# Reading and verifying feeds needs only the base install... except
+# signature verification (verify_soc), which recovers the signer and so
+# also needs this extra.
 feeds = [
     "eth-keys>=0.4",
-    "eth-hash[pycryptodome]>=0.5",
 ]
 test = [
     "pytest>=7",

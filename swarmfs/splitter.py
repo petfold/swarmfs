@@ -46,7 +46,7 @@ references to intermediates, which the joiner tolerates — it derives the
 fanout from the first child's own span rather than assuming 128 — but which
 only the node can generate.
 
-Requires keccak256, i.e. the ``feeds`` extra (``pip install swarmfs[feeds]``).
+keccak256 comes from eth-hash[pycryptodome], a base dependency since 0.9.
 """
 
 from __future__ import annotations

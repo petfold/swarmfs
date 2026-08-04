@@ -30,8 +30,8 @@ Package version this file describes: `0.8.0`.
 
 | command | gives |
 |---|---|
-| `pip install swarmfs` | `bzz://` + local-first; runtime deps are only `fsspec>=2023.6.0` and `aiohttp` |
-| `pip install "swarmfs[feeds]"` | signed feeds (`bzzf://` writes) + client-side BMT addressing (eth-keys, eth-hash) |
+| `pip install swarmfs` | `bzz://`, local-first, chunk verification, offline BMT addressing, encryption — runtime deps: `fsspec`, `aiohttp`, `eth-hash[pycryptodome]` (keccak moved into base in 0.9; before that a plain install crashed on first verified/gateway read) |
+| `pip install "swarmfs[feeds]"` | feed **signing** (`bzzf://` writes) and signature *verification* — the two things needing `eth-keys`; reading feeds works from the base install |
 
 ## 3. Exports
 
