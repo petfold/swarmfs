@@ -392,6 +392,9 @@ See `docs/roadmap.md`. Short version:
 - **v0** read-only `bzz://`: client + Mantaray parse + range reads. Enough for pandas/dask.
 - **v1** stamps + immutable writes via the transactional commit engine.
 - **v2** `bzzf://` feed-mounted mutability.
+- **v3 (planned)** `swarmfs.localstore` — shared local-first blob store (memory/disk/Swarm
+  cooperating; pinned-until-confirmed invariant, durability ladder, push/sync). Design:
+  `docs/localstore-design.md`. recordstore is the second consumer.
 - **later** encrypted refs (128-hex), ACT, redundancy level as write kwarg, gateway fallback,
   wire up the server-side listing endpoint when it lands.
 

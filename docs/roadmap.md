@@ -180,6 +180,38 @@ feed before consulting the listing cache.
       This is also the erasure-coding shape that broke `join.py`'s 128-fanout
       assumption (fixed the same week).
 
+## v3 — local-first store (`swarmfs.localstore`) — planned (2026-08-04)
+
+Goal: one shared layer that makes memory, local disk, and Swarm cooperate
+instead of competing — local-first, not caching. Full design (invariant,
+durability ladder, on-disk format, eviction, phases L0–L4):
+**[`docs/localstore-design.md`](localstore-design.md)**. Design agreed with
+recordstore as the second consumer (its ROADMAP has the matching track);
+grew out of recordstore's "should values get a cache too?" question.
+
+The one-paragraph version: a self-contained store directory (blobs +
+append-only JSONL journal + rebuildable index — the *format* is the spec,
+deliberately language-neutral; no fsspec dependency) holding the invariant
+that unpushed blobs are pinned and only network-confirmed blobs are
+evictable. Commits are always local and fast; a background worker pushes and
+confirms (`staged → committed → on-node → network-confirmed`), with `sync()`
+as the blocking certainty barrier. Byte budget with a soft limit for pinned
+data; two-class TTL-aware LRU eviction so structure outlives values and
+nothing evicts against a dying batch.
+
+- [ ] **L0 — format spec + core store** (no network): blob dir, journal,
+      index, budget, pinning, eviction, bounded memory-cache wrapper.
+      Property-test the invariant under crash injection.
+- [ ] **L1 — push worker + durability ladder**: deferred/direct upload,
+      tag/stewardship confirmation (validate mechanics live), TTL recording,
+      `sync()`, `status()`.
+- [ ] **L2 — recordstore adoption** (tracked in recordstore's ROADMAP).
+- [ ] **L3 — swarmfs write-path adoption**: commit-engine spool →
+      localstore; transactional commits become local-first; bzzf feed
+      updates ride the ladder.
+- [ ] **L4 — working-set controls**: named pins, `fetch` warm-up,
+      only-on-Swarm accounting in `status()`, history retention policy.
+
 ## Later / opportunistic
 
 - [ ] Server-side listing endpoint support: when the upstream endpoint (ethersphere/bee#5535,
