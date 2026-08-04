@@ -240,6 +240,44 @@ def test_push_ref_equality_assertion():
         remote.push_blob(ref, b"data")
 
 
+def test_witness_carries_the_verify_fetches(store):
+    """With a witness attached, confirmation's retrieve-and-verify goes
+    through the independent endpoint, not the uploading node."""
+    remote, witness = FakeRemote(), FakeRemote()
+    fetched = []
+    witness.fetch = lambda ref, _w=witness: (
+        fetched.append(ref) or _w.blobs[ref])
+    # the witness only "sees" what propagated: mirror pushes into it
+    orig_push = remote.push_blob
+    remote.push_blob = lambda ref, data, deferred=True: (
+        orig_push(ref, data, deferred),
+        witness.blobs.__setitem__(ref, data))[0]
+    with Syncer(store, remote, fast_policy(), witness=witness) as syncer:
+        root, refs = commit_blobs(store, b"a", b"b", b"c")
+        syncer.sync(timeout=WAIT)
+    assert set(fetched) == set(refs)  # every sampled fetch hit the witness
+
+
+def test_unpropagated_blob_defers_confirmation_via_witness(store):
+    """A witness that can't see the data yet (network propagation lag)
+    blocks the confirmed rung; once it can, confirmation lands."""
+    remote, witness = FakeRemote(), FakeRemote()  # witness.blobs stays empty
+    with Syncer(store, remote, fast_policy(), witness=witness) as syncer:
+        root, refs = commit_blobs(store, b"slow to spread")
+        assert not store.wait_for(root, CONFIRMED, timeout=0.4)
+        assert store.status().roots[root] == PUSHED  # on-node, not network
+        witness.blobs.update(remote.blobs)           # "propagated"
+        syncer.sync(timeout=WAIT)
+        assert store.network_confirmed(root)
+
+
+def test_read_only_remote_refuses_push():
+    remote = BeeRemote.__new__(BeeRemote)
+    remote.client, remote.stamp = None, None
+    with pytest.raises(RuntimeError, match="read-only"):
+        remote.push_blob("ab" * 32, b"data")
+
+
 # -- triggers ------------------------------------------------------------------------
 
 
@@ -276,6 +314,35 @@ def test_sync_timeout_names_last_error(store):
 # -- live (gated) ---------------------------------------------------------------------
 
 BEE = os.environ.get("SWARMFS_TEST_BEE")
+WITNESS = os.environ.get("SWARMFS_TEST_WITNESS")  # a second node's API url
+
+
+@pytest.mark.skipif(not (BEE and WITNESS),
+                    reason="set SWARMFS_TEST_BEE and SWARMFS_TEST_WITNESS "
+                           "(a second node — no gateway default: same-node "
+                           "stewardship already checks the network)")
+def test_live_witnessed_confirmation(tmp_path):
+    """Optional belt-and-braces: confirmation's verify fetches through an
+    independent second node. Not required for network proof — stewardship
+    on the uploading node already asks the network peer-to-peer — this
+    covers the distrusted-own-node scenario only."""
+    pytest.importorskip("eth_hash")
+    store = LocalStore(str(tmp_path / "wit"), addressing="swarm")
+    remote = BeeRemote(BEE, stamp=os.environ.get("SWARMFS_TEST_STAMP",
+                                                 "auto"))
+    witness = BeeRemote(WITNESS, stamp=None)  # read-only, untrusted
+    try:
+        policy = fast_policy(direct_upload=True,  # push to network now
+                             backoff_base=3, backoff_max=10)
+        with Syncer(store, remote, policy, witness=witness) as syncer:
+            root, refs = commit_blobs(
+                store, b"witnessed confirmation " * 80)
+            syncer.sync(timeout=240)  # worker retries while it propagates
+            assert store.network_confirmed(root)
+    finally:
+        store.close()
+        remote.close()
+        witness.close()
 
 
 @pytest.mark.skipif(not BEE, reason="set SWARMFS_TEST_BEE=<bee api url>")

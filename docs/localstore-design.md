@@ -318,8 +318,24 @@ that story honest:
    default is nonzero; setting it to `0` is a deliberate operator opt-out
    that reverts eviction safety to trusting the node's claims, and
    `status()` should say so when it is off.
-   (Whether stewardship's check already exercises the network path rather
-   than the node's own store is one of the L1 questions to settle live.)
+   **Settled at L1, from the Bee source: confirmation is p2p-native.**
+   Stewardship IS a network check — `steward.IsRetrievable` deliberately
+   bypasses the local store and retrieves every chunk of the tree through
+   the retrieval protocol from proximity-selected remote peers
+   (`pkg/steward/steward.go:84` via `netGetter`;
+   `pkg/retrieval/retrieval.go:133` routes to `closestPeer`, using the
+   local store only to cache results). Asking "a random second node,
+   peer-to-peer" is exactly what the node already does on our behalf — so
+   the default confirmation needs no gateway, no external endpoint, no
+   dependency beyond the node itself. The same-node fetch-and-hash sample
+   adds integrity on top. `Syncer(witness=…)` remains as an *optional*
+   guard for the narrower threat of the uploading node itself lying or
+   compromised: prefer a second node you run (a gateway is a centralized
+   liveness dependency — though a bad witness can only delay confirmation,
+   never lose data, since every fetched byte is hashed against its ref).
+   A cheaper propagation signal for large trees, if ever needed:
+   push-sync receipts via the tags API — each synced count is backed by a
+   receipt from a remote storer node.
 4. **Local scrub (L4).** The format already mandates that a blob file not
    hashing to its name is corrupt and MUST be treated as absent — a
    `scrub()` verb (git-fsck style) makes that real against bitrot:

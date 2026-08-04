@@ -240,12 +240,27 @@ nothing evicts against a dying batch.
       ref-equality assertion (local BMT ref == node reference, erasure
       coding off), `stewardship_get` works as wired, retrieve-and-verify
       passed on real fetches, batch TTL recorded (34-day batch), and
-      evict-then-heal round-tripped through the node. One caveat stays
-      open: with a single local node, fetch and stewardship plausibly
-      answer from the node's own store, so whether *network-confirmed*
-      truly exercises the network path needs a second node or gateway —
-      revisit before trusting eviction on data that only ever touched one
-      node.
+      evict-then-heal round-tripped through the node. The single-node
+      worry ("does stewardship just read the node's own store?") is
+      settled **from the Bee source, in our favor**:
+      `steward.IsRetrievable` bypasses the local store and retrieves
+      every chunk through the retrieval protocol from proximity-selected
+      remote peers (`pkg/steward/steward.go` `netGetter` →
+      `pkg/retrieval/retrieval.go` `closestPeer`; the local store only
+      caches results). Confirmation is therefore p2p-native by default —
+      no gateway, no external dependency; querying other nodes
+      peer-to-peer is what stewardship *is*. (An earlier draft of this
+      entry recommended a public-gateway witness for production; wrong —
+      gateways are centralized liveness dependencies and unnecessary.)
+      `Syncer(witness=…)` stays as an optional guard for a distrusted or
+      compromised own node — prefer a second node you run; untrusted by
+      construction (every fetched byte hashes against its ref, so a bad
+      witness can only delay confirmation, never lose data). Its live
+      test is gated on an explicit `SWARMFS_TEST_WITNESS` second-node
+      URL. One-off manual check 2026-08-04: a blob uploaded through the
+      local node was fetched back byte-identical through a public
+      gateway — independent-path retrieval works; it is just not a
+      dependency of anything.
       *Findings pinned:*
       1. **Push-latest-only cannot be a worker behavior** (design doc
          corrected in three places): a blob-blind layer must push every

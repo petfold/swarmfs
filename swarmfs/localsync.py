@@ -14,10 +14,14 @@ Trust tiering (design doc, *Verification and trust*):
 
 - the push response is only ever a node claim, so it promotes a root to
   *pushed* and no further;
-- *confirmed* — the rung that permits eviction — requires
-  retrieve-and-verify: a sample of the root's blobs fetched back and hashed
-  against their refs, plus the node's stewardship claim. `confirm_sample=0`
-  is the explicit opt-out that trusts stewardship alone.
+- *confirmed* — the rung that permits eviction — is p2p-native: the
+  stewardship check IS a network check (verified in the Bee source:
+  ``steward.IsRetrievable`` bypasses the local store and retrieves every
+  chunk through the retrieval protocol from proximity-selected peers —
+  ``pkg/steward/steward.go``, ``pkg/retrieval/retrieval.go``), plus a
+  sample of the root's blobs fetched back and hashed against their refs
+  (integrity). `confirm_sample=0` skips the hash sample and leans on
+  stewardship alone.
 - every upload asserts the node returned the locally computed reference
   (free: the ref is the blob's filename) — the tripwire for the
   erasure-coding address-space fork.
@@ -81,16 +85,25 @@ class BeeRemote:
     `SwarmClient`.
     """
 
-    def __init__(self, api_url: Optional[str] = None, stamp: str = "auto",
+    def __init__(self, api_url: Optional[str] = None,
+                 stamp: Optional[str] = "auto",
                  client: Optional[SyncSwarmClient] = None,
                  min_batch_ttl: int = 86400):
         self.client = client or SyncSwarmClient(api_url)
-        self.stamp = _run_sync(
+        # stamp=None -> read-only remote: no stamp resolution (a gateway
+        # has no /stamps), fetch/stewardship only. This is the *witness*
+        # shape — see Syncer(witness=…) — and needs no trust: every fetched
+        # byte is hashed against its ref by the caller.
+        self.stamp = None if stamp is None else _run_sync(
             self.client.loop,
             StampManager(self.client._client, min_batch_ttl).resolve, stamp)
 
     def push_blob(self, ref: str, data: bytes,
                   deferred: bool = True) -> None:
+        if self.stamp is None:
+            raise RuntimeError(
+                "this BeeRemote is read-only (stamp=None) — a witness "
+                "verifies, it does not upload")
         got = self.client.bytes_post(data, self.stamp, deferred=deferred)
         if got != ref:
             raise BlobVerificationFailed(
@@ -128,9 +141,20 @@ class Syncer:
     """
 
     def __init__(self, store: LocalStore, remote,
-                 policy: Optional[SyncPolicy] = None):
+                 policy: Optional[SyncPolicy] = None, witness=None):
         self.store = store
         self.remote = remote
+        #: Optional independent endpoint (`BeeRemote(url, stamp=None)`,
+        #: read-only) that confirmation's verify fetches go through instead
+        #: of the uploading node. NOT needed for network proof — same-node
+        #: stewardship already asks the network peer-to-peer (see the
+        #: module docstring) — this guards the narrower scenario of the
+        #: uploading node itself lying or compromised. Prefer a second
+        #: node you run over a gateway (a centralized witness is a
+        #: liveness dependency); either way it is untrusted by
+        #: construction — every fetched byte is hashed against its ref, so
+        #: a bad witness can only delay confirmation, never lose data.
+        self.witness = witness
         self.policy = policy or SyncPolicy()
         if self.policy.pinned_bytes_limit is None and store.max_bytes:
             self.policy.pinned_bytes_limit = store.max_bytes // 4
@@ -252,8 +276,9 @@ class Syncer:
             if state.rung == COMMITTED:
                 continue  # push failed mid-round; next round retries it
             sample = self._sample(state.blobs)
+            fetch_via = self.witness or self.remote
             for ref in sample:
-                data = self.remote.fetch(ref)
+                data = fetch_via.fetch(ref)
                 if self.store.address(data) != ref:
                     raise BlobVerificationFailed(
                         f"retrieve-and-verify failed for {ref[:16]}… of "
