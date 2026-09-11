@@ -452,7 +452,10 @@ gateway selection/fallback (see next section).
 
 ## Packaging & CI (decided, implemented)
 
-- **Version**: `0.9.0` (encrypted storage and recall — files AND directories, feeds over 128-hex roots, all live-validated; keccak moved into base deps and [feeds] became signing-only; feeds reference section; bytes_size over encrypted refs via ranged GET. `0.8.0` was public raw-reference reads: `fs.read_reference`/`fs.reference_size`, grown for ontodag-fs which was reaching into the private `_read_reference`; `0.7.1` was docs: the test-pinned REFERENCE.md + v3 README/User Guide catch-up; `0.7.0` was L3+L4: the fs's own write path goes local-first —
+- **Version**: `0.10.0` (2026-09-11: the standalone read-only FUSE mount —
+  `swarmfs mount`, the package's first console script — and ACT-protected
+  content, both live-validated against Bee 2.8.2; plus the gateway `/health`
+  plain-text fix. `0.9.0` was encrypted storage and recall — files AND directories, feeds over 128-hex roots, all live-validated; keccak moved into base deps and [feeds] became signing-only; feeds reference section; bytes_size over encrypted refs via ranged GET. `0.8.0` was public raw-reference reads: `fs.read_reference`/`fs.reference_size`, grown for ontodag-fs which was reaching into the private `_read_reference`; `0.7.1` was docs: the test-pinned REFERENCE.md + v3 README/User Guide catch-up; `0.7.0` was L3+L4: the fs's own write path goes local-first —
   `SwarmFileSystem(local_store=..., redundancy=0)`, `LocalFirstCommitEngine`,
   local-first reads for known refs (offline read-your-writes), bzzf
   publish-after-confirmation, `scrub()`, `StoreStatus.batch_expiries` — plus

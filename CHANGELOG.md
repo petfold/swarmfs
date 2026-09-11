@@ -10,7 +10,7 @@ original wording). Entries for versions whose notes were never written are
 summarised from their release commits, so they say what shipped without
 claiming more detail than the history holds.
 
-## [Unreleased]
+## [0.10.0] — 2026-09-11
 
 ### Added
 

@@ -509,6 +509,26 @@ Things worth knowing, all measured against a real node:
 - **The history is the key.** It is on `fs.act_history` and on every
   `CommitResult`; swarmfs never writes it anywhere for you. Lose it and the
   content is gone, for the publisher too.
+- **No separate key distribution.** With ACT plus encryption a grantee
+  does *not* need to be sent the content's decryption key: an encrypted
+  reference is address + key, and ACT wraps that whole reference, so the
+  key travels inside what ACT protects. The access key that unwraps it is
+  stored once per grantee, encrypted to their public key (Bee derives a
+  shared secret from the grantee's public key and its own private key,
+  ECDH-style, and the grantee's node derives the same one from theirs).
+  What a grantee has to receive out of band is three non-secret values —
+  the `bzz://` URL, the history address, the publisher's public key — and
+  everything else happens inside their node. Revocation removes their
+  copy of the access key going forward; it cannot recall a key or data
+  they already unwrapped, which is inherent to any encryption scheme.
+- **Interoperable with the rest of Swarm.** swarmfs adds nothing to ACT
+  on the wire: the same `Swarm-Act-*` headers and `/grantee` endpoints
+  that swarm-cli and bee-js use. Content protected with swarmfs is
+  readable with `swarm-cli download --act …` or bee-js given the same
+  history and publisher key, and vice versa. Two conventions are
+  swarmfs's own and client-side only: `act=True` turns encryption on
+  (other tools leave that to you), and ACT headers are sent for root
+  references only (which is simply how Bee lays protected content out).
 - **Feeds work unchanged.** A `bzzf://` feed whose writer has `act=True`
   publishes ACT references; a reader with the history follows it.
 
