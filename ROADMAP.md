@@ -77,6 +77,23 @@ trip. Notes from the live run: the old postage batch filled up and the fail-earl
 `POST /stamps` takes `Immutable` as a *header*, not a query param, so it came out
 immutable — fine at this depth).
 
+## Standalone FUSE mount — not built (noted 2026-09-11)
+
+ontodag-fs's roadmap has asked for this since its Step 0, and it was never
+built here, which nobody noticed because ontodag-fs mounts through its own CLI
+instead. It is fsspec's generic FUSE wrapper over the existing backend, not new
+code:
+
+- [ ] Verify `fsspec.fuse.run(SwarmFileSystem(...), "bzz-root-or-ref/", mountpoint)`
+      works read-only against the memory backend and a Bee gateway; fix any
+      AbstractFileSystem conformance gaps it exposes.
+- [ ] Add a `swarmfs mount <ref-or-bzz-url> <mountpoint>` console entry point —
+      this package currently declares **no** console scripts at all — plus a
+      README section, with the fusepy/libfuse caveat and a note that it is
+      read-only for immutable references.
+- [ ] Optional: a `pytest -m fuse` integration test, skipped when libfuse is
+      absent.
+
 ## v2 — `bzzf://` feed-mounted mutability
 
 Goal: a stable, writable mount where the URL doesn't change as contents change.
