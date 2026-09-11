@@ -24,7 +24,7 @@ from swarmfs import SwarmFileSystem
 from swarmfs.cli import _storage_options, build_parser, main
 from swarmfs.fuse import normalize_url, swarm_filesystem_of
 
-from conftest import FILES
+from conftest import FILES, FakeClient
 
 REF = "ab" * 32
 
@@ -310,3 +310,142 @@ def test_bzzf_mount_is_a_live_view_of_the_feed(manifest, tmp_path):
     finally:
         _unmount(str(mp))
         th.join(timeout=10)
+
+
+# ------------------------------------------------------------- writable mount
+
+def _wait_ready(mp, th):
+    deadline = time.monotonic() + 15
+    while not os.path.exists(mp / ".fuse_ready"):
+        assert th.is_alive(), "FUSE thread died before the mount was ready"
+        assert time.monotonic() < deadline, "mount did not become ready"
+        time.sleep(0.05)
+
+
+@pytest.mark.fuse
+def test_rw_mount_commits_on_release(fs, tmp_path):
+    """Every saved file is one commit; the mount shows the new state; the
+    lineage head advances (read-your-writes through the root map)."""
+    reason = _fuse_unavailable()
+    if reason:
+        pytest.skip(reason)
+    from swarmfs.fuse import mount
+
+    fs, root = fs
+    mp = tmp_path / "mnt"
+    mp.mkdir()
+    th = mount(f"bzz://{root}", str(mp), fs=fs, foreground=False, ready_file=True, rw=True)
+    try:
+        _wait_ready(mp, th)
+        assert stat.S_IMODE(os.stat(mp / "index.html").st_mode) == 0o644
+
+        # create + write + close: one commit, visible through the mount and the fs
+        (mp / "data" / "new.txt").write_bytes(b"fresh")
+        assert (mp / "data" / "new.txt").read_bytes() == b"fresh"
+        assert len(fs.commit_log) == 1
+        head = fs.latest(root)
+        assert head != root
+        assert fs.cat_file(f"bzz://{head}/data/new.txt") == b"fresh"
+        assert fs.cat_file(f"bzz://{root}/data/new.txt") == b"fresh"  # read-your-writes
+
+        # getattr right after create, before release (the kernel does this)
+        with open(mp / "data" / "partial.txt", "wb") as f:
+            f.write(b"half")
+            f.flush()
+            assert os.stat(mp / "data" / "partial.txt").st_size == 4
+            assert "partial.txt" in os.listdir(mp / "data")
+        assert len(fs.commit_log) == 2
+
+        # overwrite (O_TRUNC) and append
+        (mp / "index.html").write_bytes(b"<h1>rewritten</h1>")
+        with open(mp / "index.html", "ab") as f:
+            f.write(b"<!-- more -->")
+        assert (mp / "index.html").read_bytes() == b"<h1>rewritten</h1><!-- more -->"
+        assert fs.cat_file(f"bzz://{root}/index.html") == b"<h1>rewritten</h1><!-- more -->"
+
+        # mkdir (implicit in manifests): phantom until content lands
+        os.mkdir(mp / "newdir")
+        assert os.path.isdir(mp / "newdir") and os.listdir(mp / "newdir") == []
+        os.mkdir(mp / "newdir" / "sub")
+        with pytest.raises(OSError) as e:
+            os.rmdir(mp / "newdir")
+        assert e.value.errno == errno.ENOTEMPTY
+        os.rmdir(mp / "newdir" / "sub")
+        (mp / "newdir" / "inside.txt").write_bytes(b"in")
+        assert sorted(os.listdir(mp / "newdir")) == ["inside.txt"]
+        assert fs.exists(f"bzz://{root}/newdir/inside.txt")
+
+        # unlink and rename go through the filesystem's verbs
+        os.unlink(mp / "data-old" / "readme.md")
+        assert not fs.exists(f"bzz://{root}/data-old/readme.md")
+        with pytest.raises(FileNotFoundError):
+            os.stat(mp / "data-old" / "readme.md")
+        os.rename(mp / "data" / "new.txt", mp / "assets" / "moved.txt")
+        assert (mp / "assets" / "moved.txt").read_bytes() == b"fresh"
+        assert not fs.exists(f"bzz://{root}/data/new.txt")
+        os.rename(mp / "newdir", mp / "renamed")
+        assert (mp / "renamed" / "inside.txt").read_bytes() == b"in"
+
+        # metadata a content address does not have: accepted, ignored
+        os.chmod(mp / "index.html", 0o600)
+        os.utime(mp / "index.html", (1, 1))
+        shutil.copy2(mp / "index.html", mp / "copy.html")  # cp -p's dance
+        assert (mp / "copy.html").read_bytes() == (mp / "index.html").read_bytes()
+
+        # truncate an existing file in place
+        os.truncate(mp / "copy.html", 4)
+        assert (mp / "copy.html").read_bytes() == b"<h1>"
+    finally:
+        _unmount(str(mp))
+        th.join(timeout=10)
+    assert not th.is_alive()
+    # and the whole history is snapshots: the original root is untouched
+    assert fs.cat_file(f"bzz://{root}/index.html") != b"<h1>hello swarm</h1>"  # via head
+    fresh = SwarmFileSystem(client=fs.client, skip_instance_cache=True)
+    assert fresh.cat_file(f"bzz://{root}/index.html") == b"<h1>hello swarm</h1>"
+
+
+def test_rw_mount_checks_the_stamp_before_mounting(manifest, tmp_path):
+    from swarmfs import StampError
+    from swarmfs.fuse import mount
+
+    root, store = manifest
+    fs = SwarmFileSystem(client=FakeClient(store, stamps=[]), skip_instance_cache=True)
+    mp = tmp_path / "mnt"
+    mp.mkdir()
+    with pytest.raises(StampError):
+        mount(f"bzz://{root}", str(mp), fs=fs, rw=True)
+    assert os.listdir(mp) == []  # nothing was mounted
+
+
+@pytest.mark.fuse
+def test_rw_bzzf_mount_publishes_the_feed(manifest, tmp_path):
+    reason = _fuse_unavailable()
+    if reason:
+        pytest.skip(reason)
+    pytest.importorskip("eth_keys")
+    from swarmfs import SwarmFeedFileSystem
+    from swarmfs.feeds import FeedSigner
+    from swarmfs.fuse import mount
+
+    from conftest import FakeClient
+
+    key = bytes(range(1, 33)).hex()
+    owner = FeedSigner(key).owner_hex
+    _, store = manifest
+    writer = SwarmFeedFileSystem(client=FakeClient(store), signer=key, skip_instance_cache=True)
+    writer.pipe_file(f"bzzf://{owner}/notes/first.txt", b"one")
+    mp = tmp_path / "mnt"
+    mp.mkdir()
+    th = mount(f"bzzf://{owner}/notes", str(mp), fs=writer, foreground=False,
+               ready_file=True, rw=True)
+    try:
+        _wait_ready(mp, th)
+        (mp / "second.txt").write_bytes(b"two")
+        os.unlink(mp / "first.txt")
+    finally:
+        _unmount(str(mp))
+        th.join(timeout=10)
+    reader = SwarmFeedFileSystem(client=FakeClient(store), skip_instance_cache=True)
+    assert reader.ls(f"bzzf://{owner}/notes", detail=False) == [f"{owner}/notes/second.txt"]
+    assert reader.cat_file(f"bzzf://{owner}/notes/second.txt") == b"two"

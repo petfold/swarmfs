@@ -122,12 +122,33 @@ code — `swarmfs/fuse.py` subclasses `fsspec.fuse.FUSEr` and adds policy:
       `fusermount`; CI installs libfuse2 so they run there. Seven more
       tests cover URL normalisation, chain unwrapping, pre-flight checks
       and the CLI without FUSE.
-- [ ] Follow-up, deliberately not done: a writable mount (`--rw`: each
-      `release` a commit; `bzzf://` would publish, `bzz://` would need to
-      report the new root at unmount). The fs already supports it
-      semantically (read-your-writes through the root map), but fsspec's
-      FUSEr write path has to be replaced, not reused, and `mkdir`
-      needs phantom directories (Mantaray has no empty ones).
+- [x] **Writable mount** (`--rw` / `mount(rw=True)`, 2026-09-11). fsspec's
+      FUSEr write path was replaced, not reused: writes are buffered per
+      open file (spooled, 16 MiB then disk) and committed as one
+      `fs.open(path, "wb")` write — one commit per file. *Findings:*
+      (1) FUSE delivers `release` **asynchronously after `close(2)`
+      returns** — the first test asserted a commit right after a `with
+      open(...)` block and found none; so the commit happens in `flush`
+      (and `fsync`), which the kernel calls synchronously on close and
+      whose error reaches the application — a refused commit (no stamp, a
+      rejected classification) is an error from `close`, and a refused
+      buffer stays pending for a retry. (2) `getattr` arrives right after
+      `create`, before any content exists in the manifest, and `mkdir` has
+      nothing to create (Mantaray directories are implicit): both are
+      answered from the mounter's own tables — in-flight buffers and
+      phantom directories — until content lands. (3) fsspec's generic
+      recursive `mv` trips over implicit directories (`cp_file` on the
+      directory path); a directory rename moves every file under the prefix
+      in one transaction. `chmod`/`chown`/`utimens` are accepted and
+      ignored so `cp -p`, `rsync` and editors complete. A Swarm
+      filesystem's stamp is resolved *before* mounting (fail early). A
+      `bzz://` mount shows the latest state while mounted and prints the
+      new root at unmount; `bzzf://` with `--signer` publishes per commit.
+      Live: mounted the uploaded reference `--rw` on Bee 2.8.2, `cp`/`rm`/
+      `mv`/`mkdir` from the shell, unmounted, remounted the printed root
+      read-only — exactly the edited tree. Works for any fsspec filesystem
+      via `fs=` (ontodag-fs can flip its mount to writable now that its
+      filing landed).
 
 ## v2 — `bzzf://` feed-mounted mutability
 

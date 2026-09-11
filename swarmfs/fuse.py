@@ -9,9 +9,9 @@ polish:
   writes fail with EROFS before they reach Python, and every mutating
   operation here raises EROFS as well. A ``bzz://`` reference is immutable
   by construction, and a ``bzzf://`` feed is a *view* that follows the
-  feed's updates (``feed_ttl``) — neither is a place to type into. Writing
-  through a mount (each ``release`` a commit) is a possible follow-up, not
-  a thing this module half-does.
+  feed's updates (``feed_ttl``) — neither is a place to type into by
+  default. ``rw=True`` (``swarmfs mount --rw``) opts in: each saved file is
+  one commit — see ``WritableSwarmFUSEr``.
 - **Attributes that make sense for content-addressed data.** Files are
   ``0444``, directories ``0555``, owned by the mounting user; timestamps are
   the mount time — a constant, so nothing downstream sees content "change"
@@ -42,8 +42,11 @@ import errno
 import functools
 import logging
 import os
+import posixpath
 import re
+import shutil
 import stat
+import tempfile
 import threading
 import time
 
@@ -137,6 +140,9 @@ def _ops_class():
             except PermissionError as e:
                 logger.warning("%s %s: %s", method.__name__, path, e)
                 raise FuseOSError(errno.EACCES) from e
+            except NotImplementedError as e:
+                logger.warning("%s %s: %s", method.__name__, path, e)
+                raise FuseOSError(errno.EOPNOTSUPP) from e
             except Exception as e:  # SwarmError, aiohttp, anything
                 logger.error("%s %s: %s", method.__name__, path, e)
                 raise FuseOSError(errno.EIO) from e
@@ -247,7 +253,316 @@ def _ops_class():
                "setxattr", "removexattr"):
         setattr(SwarmFUSEr, op, read_only(op))
 
-    return SwarmFUSEr
+    class WritableSwarmFUSEr(SwarmFUSEr):
+        """The writable mount (``rw=True``): every write is a commit.
+
+        Content addressing gives an object its identity only once it is
+        complete, so writes are *buffered per open file* (a spooled temp
+        file, 16 MiB in memory then disk) and become one ``fs.open(path,
+        "wb")`` write — one commit, one new root — when the last handle is
+        released. fsspec's own FUSEr writes straight into a write-mode
+        buffered file, which cannot ``seek()``; this replaces that path.
+
+        Two things the kernel expects that a Mantaray manifest cannot
+        provide are answered from the mounter's own tables: a file that has
+        been created but not yet released (``getattr`` right after
+        ``create``), and an empty directory (``mkdir`` — manifests have no
+        empty directories, they are implicit in paths). Both vanish into the
+        real filesystem the moment content lands. ``unlink`` is ``fs.rm``,
+        ``rename`` is ``fs.mv`` inside ``fs.transaction`` (one commit),
+        ``chmod``/``chown``/``utimens`` are accepted and ignored (a content
+        address has no mode or mtime), so ``cp -p``, ``rsync`` and editors'
+        save dances complete. Reads of an in-flight file come from its
+        buffer. Everything else is the read-only mounter unchanged.
+        """
+
+        def __init__(self, fs, path, ready_file=False):
+            super().__init__(fs, path, ready_file=ready_file)
+            self._pending: dict[str, tempfile.SpooledTemporaryFile] = {}  # full path -> buffer
+            self._dirty: set[str] = set()
+            self._handles: dict[int, str] = {}  # fh -> full path of a pending buffer
+            self._dirs: set[str] = set()  # mkdir'd, still empty (phantom) directories
+
+        # -- helpers ----------------------------------------------------------
+
+        def _attrs(self, is_dir: bool, size: int) -> dict:
+            a = super()._attrs(is_dir, size)
+            a["st_mode"] = (stat.S_IFDIR | 0o755) if is_dir else (stat.S_IFREG | 0o644)
+            return a
+
+        def _parent_exists(self, full: str) -> bool:
+            parent = posixpath.dirname(full.rstrip("/"))
+            if parent in self._dirs or parent == self.root.rstrip("/"):
+                return True
+            if any(p.startswith(parent + "/") for p in list(self._pending) + list(self._dirs)):
+                return True
+            try:
+                return self.fs.isdir(parent)
+            except OSError:
+                return False
+
+        def _new_handle(self, full: str) -> int:
+            fh = self.counter
+            self.counter += 1
+            self._handles[fh] = full
+            return fh
+
+        def _materialize(self, full: str) -> tempfile.SpooledTemporaryFile:
+            """Buffer for `full`: the pending one, or the existing content."""
+            buf = self._pending.get(full)
+            if buf is None:
+                buf = tempfile.SpooledTemporaryFile(max_size=16 * 2**20)
+                try:
+                    buf.write(self.fs.cat_file(full))
+                except FileNotFoundError:
+                    pass
+                self._pending[full] = buf
+            return buf
+
+        def _commit(self, full: str) -> None:
+            buf = self._pending.pop(full)
+            dirty = full in self._dirty
+            self._dirty.discard(full)
+            try:
+                if not dirty:
+                    return
+                buf.seek(0)
+                try:
+                    with self.fs.open(full, "wb") as out:
+                        shutil.copyfileobj(buf, out)
+                except BaseException:
+                    # a refused commit must not lose the buffer: the file
+                    # stays pending (and dirty), so a retry can succeed
+                    buf.seek(0)
+                    self._pending[full] = buf
+                    self._dirty.add(full)
+                    raise
+                # the directory is real now
+                d = posixpath.dirname(full)
+                while d and d in self._dirs:
+                    self._dirs.discard(d)
+                    d = posixpath.dirname(d)
+                logger.info("committed %s", full)
+            finally:
+                if full not in self._pending:
+                    buf.close()
+
+        # -- attributes & listing -------------------------------------------------
+
+        @guarded
+        def getattr(self, path, fh=None):
+            full = self._full(path)
+            if full in self._pending:
+                buf = self._pending[full]
+                buf.seek(0, os.SEEK_END)
+                return self._attrs(False, buf.tell())
+            if full in self._dirs:
+                return self._attrs(True, 0)
+            try:
+                return super().getattr(path, fh)
+            except FuseOSError as e:
+                if e.errno == errno.ENOENT and any(
+                        p.startswith(full + "/") for p in list(self._pending) + list(self._dirs)):
+                    return self._attrs(True, 0)  # implied by something in flight
+                raise
+
+        @guarded
+        def readdir(self, path, fh):
+            full = self._full(path)
+            try:
+                entries = super().readdir(path, fh)
+            except FuseOSError as e:
+                if e.errno != errno.ENOENT:
+                    raise
+                entries = [".", ".."]
+            prefix = (full + "/") if full else "/"
+            extra = set()
+            for p in list(self._pending) + list(self._dirs):
+                if p.startswith(prefix):
+                    extra.add(p[len(prefix):].split("/", 1)[0])
+            return list(dict.fromkeys(entries + sorted(extra)))
+
+        # -- files ------------------------------------------------------------------
+
+        @guarded
+        def create(self, path, mode, fi=None):
+            full = self._full(path)
+            if not self._parent_exists(full):
+                raise FuseOSError(errno.ENOENT)
+            buf = tempfile.SpooledTemporaryFile(max_size=16 * 2**20)
+            old = self._pending.get(full)
+            if old is not None:
+                old.close()
+            self._pending[full] = buf
+            self._dirty.add(full)  # even an untouched new file is a (empty) write
+            return self._new_handle(full)
+
+        @guarded
+        def open(self, path, flags):
+            full = self._full(path)
+            accmode = flags & os.O_ACCMODE
+            if accmode == os.O_RDONLY:
+                if full in self._pending:
+                    return self._new_handle(full)
+                return super().open(path, flags)
+            if flags & os.O_TRUNC:
+                buf = tempfile.SpooledTemporaryFile(max_size=16 * 2**20)
+                old = self._pending.get(full)
+                if old is not None:
+                    old.close()
+                self._pending[full] = buf
+                self._dirty.add(full)
+            else:
+                self._materialize(full)
+            return self._new_handle(full)
+
+        @guarded
+        def read(self, path, size, offset, fh):
+            full = self._handles.get(fh)
+            if full is not None and full in self._pending:
+                buf = self._pending[full]
+                buf.seek(offset)
+                return buf.read(size)
+            return super().read(path, size, offset, fh)
+
+        @guarded
+        def write(self, path, data, offset, fh):
+            full = self._handles.get(fh) or self._full(path)
+            buf = self._materialize(full)
+            buf.seek(offset)
+            buf.write(data)
+            self._dirty.add(full)
+            return len(data)
+
+        @guarded
+        def truncate(self, path, length, fh=None):
+            full = self._full(path)
+            buf = self._materialize(full)
+            buf.truncate(length)
+            if length:
+                buf.seek(0, os.SEEK_END)
+                if buf.tell() < length:  # extend with zeros, like POSIX
+                    buf.write(b"\0" * (length - buf.tell()))
+            self._dirty.add(full)
+            if fh is None and not any(h == full for h in self._handles.values()):
+                self._commit(full)  # truncate(2) on a closed file: its own write
+            return 0
+
+        @guarded
+        def flush(self, path, fh):
+            # The kernel calls flush synchronously on close(2) and returns
+            # its error to the caller; release comes later, asynchronously.
+            # Committing here means `cp` and editors learn about a refused
+            # commit (no stamp, a refused classification) as an error from
+            # close, and that the file is really committed when close
+            # returns — which is what a shell user assumes.
+            full = self._handles.get(fh)
+            if full is not None and full in self._dirty:
+                self._commit(full)
+            return 0
+
+        @guarded
+        def fsync(self, path, datasync, fh):
+            return self.flush(path, fh)
+
+        @guarded
+        def release(self, path, fh):
+            full = self._handles.pop(fh, None)
+            if full is None:
+                return super().release(path, fh)
+            if full in self._pending and full not in self._handles.values():
+                self._commit(full)  # anything left un-flushed
+            return 0
+
+        @guarded
+        def unlink(self, path):
+            full = self._full(path)
+            if full in self._pending:
+                self._pending.pop(full).close()
+                self._dirty.discard(full)
+                self._handles = {h: p for h, p in self._handles.items() if p != full}
+                try:
+                    self.fs.info(full)
+                except FileNotFoundError:
+                    return 0  # never committed: nothing more to do
+            self.fs.rm(full)
+            return 0
+
+        @guarded
+        def rename(self, old, new):
+            src, dst = self._full(old), self._full(new)
+            if src in self._pending:  # in flight: just rebind the buffer
+                self._pending[dst] = self._pending.pop(src)
+                if src in self._dirty:
+                    self._dirty.discard(src)
+                    self._dirty.add(dst)
+                self._handles = {h: (dst if p == src else p) for h, p in self._handles.items()}
+                return 0
+            if src in self._dirs:
+                self._dirs.discard(src)
+                self._dirs.add(dst)
+                return 0
+            if self.fs.isdir(src) and not self.fs.isfile(src):
+                # directories are implicit: move every file under the prefix
+                # (fsspec's generic recursive mv trips over that), one commit
+                files = self.fs.find(src)
+                with self.fs.transaction:
+                    for f in files:
+                        rel = f[len(self.fs._strip_protocol(src)):].lstrip("/")
+                        self.fs.cp_file(f, posixpath.join(dst, rel))
+                        self.fs.rm_file(f)
+                # phantom children (mkdir'd, still empty) move along
+                for d in [d for d in self._dirs if d.startswith(src + "/")]:
+                    self._dirs.discard(d)
+                    self._dirs.add(dst + d[len(src):])
+                return 0
+            with self.fs.transaction:
+                self.fs.mv(src, dst)
+            return 0
+
+        # -- directories --------------------------------------------------------------
+
+        @guarded
+        def mkdir(self, path, mode):
+            full = self._full(path)
+            if not self._parent_exists(full):
+                raise FuseOSError(errno.ENOENT)
+            try:
+                if self.fs.exists(full):
+                    raise FuseOSError(errno.EEXIST)
+            except OSError:
+                pass
+            self.fs.mkdir(full)  # a filesystem that refuses (lattice edits) refuses here
+            self._dirs.add(full)
+            return 0
+
+        @guarded
+        def rmdir(self, path):
+            full = self._full(path)
+            if full in self._dirs:
+                if any(p.startswith(full + "/") for p in list(self._pending) + list(self._dirs)):
+                    raise FuseOSError(errno.ENOTEMPTY)
+                self._dirs.discard(full)
+                return 0
+            try:
+                if self.fs.ls(full, detail=False):
+                    raise FuseOSError(errno.ENOTEMPTY)
+            except FileNotFoundError:
+                raise FuseOSError(errno.ENOENT) from None
+            return 0  # an empty manifest directory does not exist to begin with
+
+        # -- metadata a content address does not have --------------------------------
+
+        def chmod(self, path, mode):
+            return 0
+
+        def chown(self, path, uid, gid):
+            return 0
+
+        def utimens(self, path, times=None):
+            return 0
+
+    return SwarmFUSEr, WritableSwarmFUSEr
 
 
 def mount(
@@ -260,9 +575,11 @@ def mount(
     allow_other: bool = False,
     fs=None,
     fsname: str | None = None,
+    rw: bool = False,
     **storage_options,
 ):
-    """Mount ``url`` at ``mountpoint``, read-only.
+    """Mount ``url`` at ``mountpoint`` — read-only by default, writable
+    with ``rw=True``.
 
     Parameters
     ----------
@@ -297,6 +614,17 @@ def mount(
     fsname:
         What ``mount``/``df`` show as the source (default: ``url`` when it
         has no commas or spaces).
+    rw:
+        Writable mount: each file written is committed when its last handle
+        closes (one commit per file — the autocommit semantics of the
+        filesystem underneath), ``rm``/``mv``/``mkdir`` map to the
+        filesystem's verbs, and ``chmod``/``utimens`` are accepted and
+        ignored. On a ``bzz://`` mount every commit yields a new root; the
+        mount keeps showing the latest (read-your-writes) and the final
+        root is logged and returned via ``fs.latest(...)`` — this function
+        logs it at unmount. On ``bzzf://`` each commit publishes the feed.
+        A Swarm filesystem is checked for a usable postage stamp *before*
+        mounting. Not ``kernel_cache``d (content moves).
     **storage_options:
         Passed to ``url_to_fs`` — ``api_url``, ``allow_gateway``,
         ``verify``, ``feed_ttl``… For a chained URL, key them by protocol
@@ -338,18 +666,30 @@ def mount(
             f"{url} is a file; FUSE mounts a directory — mount its parent "
             "and read the file inside")
 
-    fuse = _import_fusepy()
-    ops_cls = _ops_class()
-    ops = ops_cls(fs, path, ready_file=ready_file)
+    if rw and inner is not None and getattr(inner, "_local", None) is None:
+        # fail early, the swarmfs way: a mount that cannot commit should not
+        # come up and then refuse every save with EACCES
+        from fsspec.asyn import sync
 
-    options: dict = {"ro": True, "subtype": "swarmfs"}
+        from .stamps import StampManager
+
+        sync(inner.loop, StampManager(inner.client).resolve, inner.stamp)
+
+    fuse = _import_fusepy()
+    ro_cls, rw_cls = _ops_class()
+    ops = (rw_cls if rw else ro_cls)(fs, path, ready_file=ready_file)
+
+    options: dict = {"subtype": "swarmfs"}
+    if not rw:
+        options["ro"] = True
     name = fsname if fsname is not None else url
     if name and not re.search(r"[,\s]", name):
         options["fsname"] = name  # what `mount` and `df` display as the source
-    if inner is not None and not isinstance(inner, SwarmFeedFileSystem):
+    if inner is not None and not rw and not isinstance(inner, SwarmFeedFileSystem):
         # content at a fixed bzz:// path can never change: cached pages are
         # correct forever. A feed's content moves, so no kernel_cache there;
-        # nor for a foreign filesystem, whose paths may change meaning.
+        # nor for a foreign filesystem, whose paths may change meaning, nor
+        # for a writable mount.
         options["kernel_cache"] = True
     if allow_other:
         options["allow_other"] = True
@@ -358,7 +698,17 @@ def mount(
                 ", ".join(f"{k}={v}" for k, v in options.items()))
 
     def run():
-        fuse.FUSE(ops, mountpoint, foreground=True, nothreads=not threads, **options)
+        try:
+            fuse.FUSE(ops, mountpoint, foreground=True, nothreads=not threads, **options)
+        finally:
+            if rw and inner is not None and not isinstance(inner, SwarmFeedFileSystem):
+                heads = {}
+                for res in getattr(inner, "commit_log", []):
+                    origin = inner._origin.get(res.new_root, res.old_root or res.new_root)
+                    heads[origin] = inner.latest(res.new_root)
+                for origin, head in heads.items():
+                    logger.warning("unmounted: bzz://%s is now bzz://%s", origin, head)
+                    print(f"bzz://{head}", flush=True)
 
     if not foreground:
         th = threading.Thread(target=run, name=f"swarmfs-fuse {mountpoint}", daemon=True)

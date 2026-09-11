@@ -10,6 +10,19 @@ original wording). Entries for versions whose notes were never written are
 summarised from their release commits, so they say what shipped without
 claiming more detail than the history holds.
 
+## [0.11.0] — 2026-09-11
+
+### Added
+
+- **Writable FUSE mount** — `swarmfs mount --rw` / `swarmfs.fuse.mount(rw=True)`
+  (+ `--stamp`, `--signer`): every saved file is one commit, made on close
+  (`flush`/`fsync`) so a refused commit is the application's error;
+  `rm`/`mv`/`mkdir` map to the filesystem's verbs (directory rename in one
+  transaction; `mkdir` phantom until content lands); `chmod`/`chown`/`utimens`
+  accepted and ignored; stamp checked before mounting; a `bzz://` mount prints
+  the new root at unmount, a `bzzf://` mount publishes the feed. Any fsspec
+  filesystem mounted via `fs=` can be writable too.
+
 ## [0.10.1] — 2026-09-11
 
 ### Changed

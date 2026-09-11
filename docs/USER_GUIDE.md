@@ -556,13 +556,26 @@ rsync -a ~/mnt/dataset/ ./local-copy/
 
 Things worth knowing:
 
-- **It is read-only**, by design. A `bzz://` reference cannot change, so
+- **It is read-only by default.** A `bzz://` reference cannot change, so
   there is nothing to write *to*; a `bzzf://<owner>/<topic>` mount is a
   live, read-only view of the feed that picks up new publications (the
   feed is re-resolved every `--feed-ttl` seconds, 15 by default). Write
-  attempts fail with "Read-only file system". Writing goes through Python
-  (`fs.upload`, `pipe_file`, transactions), where the new reference is
-  something you can hold.
+  attempts fail with "Read-only file system".
+- **`--rw` makes it writable: every saved file is one commit.** On a
+  `bzz://` mount each commit yields a new root; the mount keeps showing the
+  latest state, and the final root is printed when you unmount (the
+  original reference is untouched — every commit was a snapshot). On a
+  `bzzf://` mount, `--rw --signer <private key>` publishes the feed on
+  every commit, so the URL never changes. What to expect from a shell:
+  `cp`, `mv`, `rm`, `mkdir`, editors and `rsync` all work; the commit
+  happens when a file is *closed*, and a refused commit (no usable stamp,
+  say — checked once before mounting, too) comes back as an error from the
+  close, not silently later; a `mkdir`'d directory is empty and real only
+  once something is saved in it, because a Mantaray manifest has no empty
+  directories; `chmod`, `chown` and `touch -t` are accepted and ignored — a
+  content address has no mode or mtime. Writes are buffered per file (in
+  memory up to 16 MiB, then a temporary file) until close, so a 2 GB copy
+  needs 2 GB of temporary disk, not memory. Each commit costs postage.
 - **Mount a sub-directory** by putting it in the URL:
   `swarmfs mount <ref>/data ~/mnt/data`. A bare 64-hex (or 128-hex,
   encrypted) reference is accepted as shorthand for `bzz://<ref>`.
@@ -577,8 +590,9 @@ Things worth knowing:
   reference, an unreachable node, a refused gateway, or a missing
   mountpoint each produce one line and exit code 1 — you never get a
   directory where every command says "Input/output error".
-- From Python: `swarmfs.fuse.mount(url, mountpoint)` does the same
-  (`foreground=False` runs it on a thread and returns it).
+- From Python: `swarmfs.fuse.mount(url, mountpoint, rw=...)` does the same
+  (`foreground=False` runs it on a thread and returns it); `fs=` mounts any
+  fsspec filesystem with the same policy, read-only or writable.
 
 ## Knowing a reference before you upload
 

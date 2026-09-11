@@ -81,6 +81,13 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("-o", "--option", action="append", default=[], metavar="KEY=VALUE",
                    help="extra storage option for the filesystem; for a chained URL "
                         "prefix the protocol: -o simplecache-cache_storage=/tmp/c")
+    m.add_argument("--rw", action="store_true",
+                   help="writable mount: each saved file is one commit (bzz://: a new "
+                        "root, printed at unmount; bzzf://: a feed update). Needs a "
+                        "usable stamp; checked before mounting")
+    m.add_argument("--stamp", help="postage batch id for --rw (default: auto — the "
+                                   "usable batch with the longest TTL)")
+    m.add_argument("--signer", help="bzzf:// --rw: the feed owner's private key (hex)")
     m.add_argument("--threads", action="store_true",
                    help="let FUSE serve operations concurrently (default: serial)")
     m.add_argument("--allow-other", action="store_true",
@@ -107,6 +114,10 @@ def _storage_options(args) -> dict:
         swarm["timeout"] = args.timeout
     if args.feed_ttl is not None:
         swarm["feed_ttl"] = args.feed_ttl
+    if getattr(args, "stamp", None):
+        swarm["stamp"] = args.stamp
+    if getattr(args, "signer", None):
+        swarm["signer"] = args.signer
 
     chained = "::" in url
     proto = "bzzf" if "bzzf://" in url else "bzz"
@@ -149,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             options = _storage_options(args)
             mount(args.url, args.mountpoint, threads=args.threads,
-                  allow_other=args.allow_other, **options)
+                  allow_other=args.allow_other, rw=args.rw, **options)
         except (ImportError, OSError, ValueError, aiohttp.ClientError) as e:
             # setup errors (no libfuse, bad URL, unreachable node, refused
             # gateway, missing reference): one line, exit 1 — the traceback

@@ -7,7 +7,7 @@ from .core import SwarmFile, SwarmFileSystem
 from .exceptions import BeeAPIError, BeePermissionError, StampError, SwarmError
 from .feedfs import SwarmFeedFileSystem
 
-__version__ = "0.10.1"
+__version__ = "0.11.0"
 __all__ = [
     "SwarmFileSystem",
     "SwarmFeedFileSystem",

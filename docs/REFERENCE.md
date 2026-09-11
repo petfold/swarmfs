@@ -8,7 +8,7 @@ local-first design in [localstore-design.md](localstore-design.md) and its
 Tables here are pinned against the code by `tests/test_reference.py` — if a
 name or parameter in this file and the code disagree, the suite fails.
 
-Package version this file describes: `0.10.1`.
+Package version this file describes: `0.11.0`.
 
 ## 1. Vocabulary
 
@@ -241,8 +241,8 @@ are the raw endpoints (sync twins generated).
 ## 11. FUSE mount (`swarmfs.fuse`, `swarmfs mount`)
 
 fsspec's generic FUSE wrapper (`fsspec.fuse.FUSEr`, on fusepy) over the
-backend, made **read-only** (kernel `ro` flag plus EROFS from every mutating
-operation), with `0444`/`0555` modes, the mount time as the constant
+backend, **read-only by default** (kernel `ro` flag plus EROFS from every
+mutating operation; `rw=True` opts into commit-on-close writes), with `0444`/`0555` modes (`0644`/`0755` writable), the mount time as the constant
 timestamp, errno mapping for every operation (not-found → ENOENT, node or
 network trouble → EIO, logged), and `kernel_cache` for `bzz://` mounts
 only (content at a fixed reference never changes; a feed's does). The
@@ -251,10 +251,10 @@ instead of producing an EIO directory. Needs the `fuse` extra and libfuse 2.
 
 | name | signature | semantics |
 |---|---|---|
-| `fuse.mount` | `(url, mountpoint, *, foreground=True, threads=False, ready_file=False, allow_other=False, fs=None, fsname=None, **storage_options)` | mount `url` (`bzz://`, `bzzf://`, bare 64/128-hex ref, or an fsspec chain such as `simplecache::bzz://…`) at an existing directory. Blocks until unmounted; `foreground=False` runs the FUSE loop on a daemon thread and returns it. `storage_options` go to `url_to_fs` (keyed by protocol for chains). `fs=` mounts a pre-built filesystem instead — **any** fsspec filesystem (ontodag-fs mounts its lattice view this way; `url` is then just the path, `fsname` the displayed source); `kernel_cache` only when a plain `bzz://` fs is inside. Raises `ValueError` (not a Swarm URL, when resolving), `FileNotFoundError`/`NotADirectoryError` (mountpoint or path), `ImportError`/`OSError` (fusepy/libfuse missing). |
+| `fuse.mount` | `(url, mountpoint, *, foreground=True, threads=False, ready_file=False, allow_other=False, fs=None, fsname=None, rw=False, **storage_options)` | mount `url` (`bzz://`, `bzzf://`, bare 64/128-hex ref, or an fsspec chain such as `simplecache::bzz://…`) at an existing directory, read-only unless `rw=True` — then every file is committed on close (`flush`/`fsync`; a refused commit is the close's error), `unlink`/`rename` are `rm`/`mv` (a directory rename is one transaction), `mkdir` is a phantom directory until content lands, `chmod`/`chown`/`utimens` are accepted and ignored, a `bzz://` mount logs and prints the new root at unmount, and a Swarm filesystem's stamp is resolved *before* mounting. Blocks until unmounted; `foreground=False` runs the FUSE loop on a daemon thread and returns it. `storage_options` go to `url_to_fs` (keyed by protocol for chains). `fs=` mounts a pre-built filesystem instead — **any** fsspec filesystem (ontodag-fs mounts its lattice view this way; `url` is then just the path, `fsname` the displayed source); `kernel_cache` only when a plain `bzz://` fs is inside. Raises `ValueError` (not a Swarm URL, when resolving), `FileNotFoundError`/`NotADirectoryError` (mountpoint or path), `ImportError`/`OSError` (fusepy/libfuse missing). |
 | `fuse.normalize_url` | `(url)` | bare 64/128-hex reference (with optional `/subpath`) → `bzz://<ref>…`; anything else unchanged. |
 | `fuse.swarm_filesystem_of` | `(fs)` | the `SwarmFileSystem` inside a (possibly caching-wrapped) fsspec instance; `ValueError` if none. |
-| `cli.main` | `(argv=None)` | the `swarmfs` console script (`python -m swarmfs`): subcommand `mount <url> <mountpoint>` with `--api-url`, `--allow-gateway`, `--verify`/`--no-verify`, `--timeout`, `--feed-ttl`, `-o KEY=VALUE`, `--threads`, `--allow-other`, `--debug`. Exit 0 on unmount, 1 with a one-line message on a setup error, 2 for usage. |
+| `cli.main` | `(argv=None)` | the `swarmfs` console script (`python -m swarmfs`): subcommand `mount <url> <mountpoint>` with `--rw` (+ `--stamp`, `--signer` for bzzf), `--api-url`, `--allow-gateway`, `--verify`/`--no-verify`, `--timeout`, `--feed-ttl`, `-o KEY=VALUE`, `--threads`, `--allow-other`, `--debug`. Exit 0 on unmount, 1 with a one-line message on a setup error, 2 for usage. |
 
 Command shape: `swarmfs mount bzz://<ref>[/path] <dir>`; unmount with
 `fusermount -u <dir>` or Ctrl-C. The `swarmfs` script has this one

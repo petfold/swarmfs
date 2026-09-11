@@ -259,13 +259,26 @@ endpoints already exist.
 `swarmfs.fuse.mount()`, fsspec's generic `FUSEr` subclassed, not replaced.
 Decisions:
 
-- **Read-only, enforced twice** (kernel `ro` flag + EROFS from every
-  mutating op). `bzz://` is immutable by construction; `bzzf://` mounts
-  are a *live view* that follows the feed (`feed_ttl`), still read-only.
-  A writable mount is a plausible follow-up but fsspec's FUSEr write path
-  cannot be reused (it `seek()`s a write-mode buffered file, which raises;
-  it only ever worked for memory files) and `mkdir` would need phantom
-  directories — so it was left out rather than half-done.
+- **Read-only by default, enforced twice** (kernel `ro` flag + EROFS from
+  every mutating op). `bzz://` is immutable by construction; `bzzf://`
+  mounts are a *live view* that follows the feed (`feed_ttl`).
+- **Writable on request** (`rw=True` / `--rw`, implemented 2026-09-11):
+  `WritableSwarmFUSEr` replaces fsspec's FUSEr write path (which `seek()`s
+  a write-mode buffered file and never worked for any fsspec backend).
+  Writes buffer per open file (spooled) and commit as one `fs.open(path,
+  "wb")` on **flush/fsync, not release** — measured: FUSE delivers `release`
+  asynchronously after `close(2)` returns, so a commit there is invisible
+  to the closing process and its errors are lost; `flush` is synchronous
+  with close and its error is close's return. A refused commit keeps the
+  buffer pending for retry. In-flight files and `mkdir`'d (phantom)
+  directories are answered from the mounter's tables until content lands
+  (Mantaray has neither half-written files nor empty directories).
+  Directory rename = per-file `cp_file`+`rm_file` in one transaction
+  (fsspec's recursive `mv` breaks on implicit directories). `chmod`/
+  `chown`/`utimens` accepted and ignored. Stamp resolved before mounting.
+  `bzz://` prints the new root at unmount; `bzzf://` publishes per commit.
+  Live-verified on Bee 2.8.2 from the shell (cp/rm/mv/mkdir → remounted
+  the printed root: exactly the edited tree).
 - **Fail in the terminal, not in the mount**: the path is resolved with
   `fs.info` before `FUSE()` is called, so a bad ref / unreachable node /
   refused gateway raises swarmfs's normal message; the CLI prints one line
@@ -463,7 +476,9 @@ gateway selection/fallback (see next section).
 
 ## Packaging & CI (decided, implemented)
 
-- **Version**: `0.10.1` (2026-09-11: `mount(fs=)` accepts any fsspec filesystem so
+- **Version**: `0.11.0` (2026-09-11: the writable FUSE mount — `--rw`, commit on
+  close, phantom directories, stamp pre-flight; live-verified from the shell).
+  `0.10.1` (2026-09-11: `mount(fs=)` accepts any fsspec filesystem so
   ontodag-fs can reuse the read-only FUSE policy; `fsname=`). `0.10.0` (2026-09-11: the standalone read-only FUSE mount —
   `swarmfs mount`, the package's first console script — and ACT-protected
   content, both live-validated against Bee 2.8.2; plus the gateway `/health`

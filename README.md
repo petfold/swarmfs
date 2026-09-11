@@ -194,15 +194,33 @@ ls -la ~/mnt/dataset; head ~/mnt/dataset/data/part-00000.parquet
 fusermount -u ~/mnt/dataset                    # or Ctrl-C the mount
 ```
 
-The mount is **read-only**: a `bzz://` reference is immutable by
+The mount is **read-only by default**: a `bzz://` reference is immutable by
 construction, and a `bzzf://<owner>/<topic>` mount is a *live view* of the
 feed — it follows updates (`--feed-ttl`, default 15 s) without ever
-changing URL, but writing through it is not supported. Files are `0444`,
-directories `0555`, sizes are real, reads are ranged (the kernel and fsspec
-both cache), and `simplecache::bzz://<ref>` mounts with a local disk cache
-for free. From Python the same thing is `swarmfs.fuse.mount(url,
-mountpoint)`; a gateway works too (`--api-url … --allow-gateway`, with
-chunk verification on).
+changing URL. Files are `0444`, directories `0555`, sizes are real, reads
+are ranged (the kernel and fsspec both cache), and
+`simplecache::bzz://<ref>` mounts with a local disk cache for free. From
+Python the same thing is `swarmfs.fuse.mount(url, mountpoint)`; a gateway
+works too (`--api-url … --allow-gateway`, with chunk verification on).
+
+**`--rw` makes it writable** — every file you save is one commit:
+
+```bash
+swarmfs mount --rw bzz://<reference> ~/mnt/work    # needs a usable stamp (checked first)
+cp report.parquet ~/mnt/work/data/; rm ~/mnt/work/old.csv; mv ~/mnt/work/a ~/mnt/work/b
+fusermount -u ~/mnt/work                            # prints the new root: bzz://<new>
+```
+
+A `bzz://` mount keeps showing the latest state while mounted (read-your-writes)
+and prints the final root at unmount — the original reference is untouched,
+every commit was a snapshot. A `bzzf://` mount with `--rw --signer <key>`
+publishes the feed on every commit, so the URL never changes. The commit
+happens on `close`, so `cp` and editors see a refused commit (no stamp, a
+rejected write) as an error instead of losing it; `mkdir` gives you an empty
+directory that becomes real when a file lands in it (Mantaray has no empty
+directories); `chmod`/`touch` are accepted and ignored. Other fsspec
+filesystems can be mounted through the same mounter with `fs=`, writable
+too — that is how ontodag-fs mounts its lattice view.
 
 *Caveat:* FUSE support comes from fsspec's generic wrapper over
 [fusepy](https://github.com/fusepy/fusepy), which needs a system
@@ -345,7 +363,7 @@ read.
 
 ```bash
 pip install -e ".[test]"
-pytest                                   # 409 tests; the live ones skip with no node
+pytest                                   # 412 tests; the live ones skip with no node
 SWARMFS_TEST_BEE=http://localhost:1633 \
 SWARMFS_TEST_STAMP=<batch-id> pytest tests/test_integration.py
 ```
