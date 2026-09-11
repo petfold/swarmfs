@@ -432,7 +432,36 @@ nothing evicts against a dying batch.
       encrypted roots** — the feed update carries the full 128-hex
       reference, so readers of the stable URL get decryption
       transparently (`test_live_bzzf_over_encrypted_root`).
-- [ ] ACT-protected content (pass the `swarm-act-*` headers through).
+- [x] **ACT-protected content** (2026-09-11) — more than header pass-through
+      once the contract was measured (Bee 2.8.2, all pinned by
+      `test_act_roundtrip_live` and the fake node in conftest):
+      an ACT reference is the *real reference encrypted* with the access key
+      — same length (64 hex, or 128 over encrypted content), indistinguishable
+      from a plain one; reading needs history **and** publisher key (the
+      publisher header is mandatory even for the publisher; without headers:
+      404, invisible not forbidden); **only the root is wrapped** — the
+      manifest behind it carries ordinary child refs that resolve *without*
+      headers, and *with* them a plain ref is a 404, so headers go on root
+      fetches only; plain ACT leaves content plaintext-addressable (the
+      underlying ref is even the `ETag` of a protected read) ⇒ `act=True`
+      implies `encrypt=True`; history reuse returns the same history; a
+      malformed-but-well-formed publisher key is a 400 "invalid public
+      key", not a 404. Design: `swarmfs/act.py` (`Act` header bundle,
+      `ActReader` applying it to *registered roots* only — URL roots, feed
+      heads, commit results, raw-ref reads — and `ActManager` for
+      grantees with stamp policy); client tier gains `act=` on the reads,
+      `act=`/`act_history=` → `ActUpload` on the uploads, and `addresses`,
+      `grantee_create/get/patch`; the commit engine wraps the new root
+      through a `root_saver` hook on `mantaray.save` (children unchanged);
+      fs options `act`, `act_history`, `act_publisher` (defaults to the
+      reading node's own key), `act_timestamp`, plus `publisher_key()`,
+      `create_grantees()`, `grantees()`, `patch_grantees()`. Refused: ACT
+      through a gateway (the node decrypts with *its* key), with `verify`
+      (an ACT ref is not a content address), with `local_store`. bzzf
+      feeds carry ACT refs unchanged (tested). Live: protect a directory,
+      read via a fresh history-only instance, blind 404, second commit and
+      single-file upload on one history, grantee create/patch (1-second
+      rule), publish into a grantee history — 7.7 s on a light node.
 - [x] Redundancy level as a write option (erasure coding): `redundancy=0..4` storage
       option (default **2**; 0 disables, None = node default), passed as
       `swarm-redundancy-level` on all commit uploads. Live-validated: the root chunk's

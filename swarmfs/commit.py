@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import IO, Iterable
 
 from ._client import SwarmClient
+from .act import Act
 from .mantaray import Node, add, remove, save, unmarshal
 from .stamps import StampManager
 
@@ -50,6 +51,10 @@ class CommitResult:
     written: dict[str, str] = field(default_factory=dict)  # path -> data reference
     removed: list[str] = field(default_factory=list)
     batch: str = ""  # the postage batch the commit used
+    # ACT: the history that unlocks new_root (None for an unprotected
+    # commit). Created by the first protected commit — persist it: without
+    # it the content is unreachable, for the publisher too.
+    act_history: str | None = None
 
 
 class CommitEngine:
@@ -61,6 +66,8 @@ class CommitEngine:
         pin: bool = False,
         redundancy: int | None = None,
         encrypt: bool = False,
+        act: bool = False,
+        act_publisher: str | None = None,
     ):
         self.client = client
         self.stamps = stamps
@@ -68,6 +75,12 @@ class CommitEngine:
         self.pin = pin
         self.redundancy = redundancy
         self.encrypt = encrypt
+        # ACT: protect every new root (the root node goes up with swarm-act;
+        # children stay ordinary references, which is how Bee itself lays
+        # out a protected directory). ``act_publisher`` is needed to *load*
+        # a protected origin root when patching a lineage.
+        self.act = act
+        self.act_publisher = act_publisher
 
     async def commit(
         self,
@@ -75,10 +88,14 @@ class CommitEngine:
         writes: dict[str, StagedWrite],
         removes: Iterable[str],
         stamp: str | None = None,
+        act_history: str | None = None,
     ) -> CommitResult:
         """Apply staged operations against ``root`` (None = fresh manifest).
 
-        The stamp is validated before any byte is uploaded.
+        The stamp is validated before any byte is uploaded. Under ACT,
+        ``act_history`` continues an existing history (and is what unlocks
+        ``root``); None on the first commit creates one — the result's
+        ``act_history`` carries it either way.
         """
         removes = sorted(removes)
         if not writes and not removes:
@@ -112,7 +129,16 @@ class CommitEngine:
             return await self.client.bytes_get(ref.hex())
 
         if root is not None:
-            node = unmarshal(await load(bytes.fromhex(root)))
+            if self.act:
+                if act_history is None or self.act_publisher is None:
+                    raise ValueError(
+                        "patching an ACT-protected manifest needs its history and "
+                        "the publisher's key (act_history=, act_publisher=)")
+                root_data = await self.client.bytes_get(
+                    root, act=Act(act_history, self.act_publisher))
+            else:
+                root_data = await load(bytes.fromhex(root))
+            node = unmarshal(root_data)
         else:
             node = Node()
 
@@ -131,7 +157,18 @@ class CommitEngine:
                 )
             )
 
-        new_root = await save(node, saver)
+        history_out: list[str] = []
+
+        async def act_root_saver(data: bytes) -> bytes:
+            # only the root is wrapped: the node encrypts its reference with
+            # the history's access key and hands back the ACT reference
+            up = await self.client.bytes_post(
+                data, batch, pin=self.pin, redundancy=self.redundancy,
+                encrypt=self.encrypt, act=True, act_history=act_history)
+            history_out.append(up.history)
+            return bytes.fromhex(up.reference)
+
+        new_root = await save(node, saver, act_root_saver if self.act else None)
         for sw in writes.values():
             sw.close()
         return CommitResult(
@@ -140,6 +177,7 @@ class CommitEngine:
             written=uploaded,
             removed=removes,
             batch=batch,
+            act_history=history_out[0] if history_out else None,
         )
 
 

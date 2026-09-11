@@ -284,6 +284,59 @@ Decisions:
 - Tests: `pytest -m fuse` for the three kernel-mount tests (skip naming the
   missing piece when FUSE is unavailable; CI installs libfuse2).
 
+## ACT-protected content (decided, implemented 2026-09-11)
+
+`swarmfs/act.py` + threading through client/commit/fs. Everything below was
+measured live against Bee 2.8.2 (curl first, then pinned by
+`test_act_roundtrip_live` and the FakeClient's emulation); several points
+contradict the folk description "ACT uploads encrypted data":
+
+- **An ACT reference is the real reference encrypted with the access key.**
+  Same length (64 hex; 128 when the upload was also `swarm-encrypt`),
+  opaque, indistinguishable from a plain reference. Bee decrypts it
+  server-side using *the node's own private key* (publisher or grantee) —
+  so ACT works only through your own node; gateways are refused outright.
+- **Read headers**: `swarm-act: true`, `swarm-act-history-address`,
+  `swarm-act-publisher` (compressed public key, **mandatory even for the
+  publisher** — omit it: 404), optional `swarm-act-timestamp` (a past
+  timestamp still resolved on a single-entry history). Without headers: 404
+  — invisible, not forbidden. A well-formed key that is not a curve point:
+  400 "invalid public key" (`BeeAPIError`, not `FileNotFoundError`).
+- **Only the root is wrapped.** The manifest node behind an ACT ref has
+  `refBytesSize` 32/64 children that resolve *without* headers (200), and a
+  plain ref fetched *with* ACT headers is a 404. Hence the design: the fs
+  registers **roots** (URL roots in `_split_ref`, feed heads in
+  `_resolve_path`, commit results, public `read_reference` refs) and
+  `ActReader` adds headers for those only. Every root on an ACT-configured
+  instance is treated as protected (no mixing plain and protected roots on
+  one instance — a plain root would 404).
+- **Plain ACT is not confidentiality**: the underlying reference is the
+  `ETag` of a protected read and `GET /bytes/<etag>` serves plaintext with
+  no headers; chunks are plaintext on every storing node. So `act=True`
+  ⇒ `encrypt=True` unless the caller passes `encrypt=False` (warned).
+  `encrypt`'s constructor default is now `None` (= `act`).
+- **History**: the first protected upload creates one (response header
+  `Swarm-Act-History-Address`); passing it back reuses it and returns the
+  same value; a grantee list (`POST /grantee`) has its own history that
+  uploads can target; `PATCH /grantee/{ref}` returns *new* ref + history
+  (both advance) and Bee refuses two patches within one second. Losing
+  the history loses the content — swarmfs keeps it on `fs.act_history`
+  and `CommitResult.act_history`, persists nothing, and says so.
+- **Commit engine**: children upload as before; the root goes through a
+  `root_saver` (new optional parameter of `mantaray.save`) that posts with
+  `act=True, act_history=...` and records the returned history. Patching a
+  protected lineage loads the origin root with headers (needs publisher).
+  Refused: `local_store` (not content addresses), `verify` (an ACT ref is
+  not an address to check against).
+- **Client tier**: `act: Act | None` on `bytes_get/bytes_size/bytes_iter/
+  bzz_get`; `act`/`act_history` on `bytes_post/bzz_post`, which then
+  return `ActUpload(reference, history)` (documented type change, like
+  `detail=`); `addresses`, `grantee_create/get/patch`. `bytes_size` under
+  ACT uses HEAD with headers (Content-Length is the plaintext size), since
+  an ACT ref has no chunk to read a span from.
+- **Test keys must be real curve points**: the first live run used
+  `02cdcd…` as a "wrong publisher" and got 400, not 404.
+
 ## `modified()` (decided, implemented)
 
 `AbstractFileSystem.modified()` raises `NotImplementedError` by default;
@@ -455,7 +508,10 @@ See `ROADMAP.md`. Short version:
   read-your-writes incl. `ls` and ranges; foreign refs still read through the node).
 - **Standalone FUSE mount (shipped 2026-09-11)** `swarmfs mount` / `swarmfs.fuse` —
   read-only, fsspec's FUSEr subclassed; see the section above.
-- **later** ACT, redundancy level as write kwarg, gateway fallback, a writable
+- **ACT-protected content (shipped 2026-09-11)** `act=True` / `act_history=` —
+  see the section above; the roadmap's "pass the headers through" turned into
+  root-only registration once the contract was measured.
+- **later** redundancy level as write kwarg, gateway fallback, a writable
   FUSE mount, wire up the server-side listing endpoint when it lands.
 
 ## Working agreements for Claude Code

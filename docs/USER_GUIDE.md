@@ -30,6 +30,7 @@ here, that's a bug — please open an issue.
 - [DuckDB](#duckdb)
 - [Writing more than one file at a time](#writing-more-than-one-file-at-a-time)
 - [Getting a stable URL: feeds](#getting-a-stable-url-feeds)
+- [Restricting who can read: ACT](#restricting-who-can-read-act)
 - [Mounting Swarm as a folder](#mounting-swarm-as-a-folder)
 - [Also works with](#also-works-with)
 - [Troubleshooting](#troubleshooting)
@@ -428,6 +429,89 @@ feed's owner is allowed to update it. See the
 picture, including what "last-write-wins" means if two processes update the
 same feed concurrently.
 
+## Restricting who can read: ACT
+
+Everything so far is either public (anyone with the reference reads it) or
+private by secrecy (`encrypt=True`: the decryption key rides in the
+reference, so sharing the reference shares the data). ACT — Swarm's Access
+Control Trie — adds the third option: a publisher names the *nodes* that
+may read, by public key, and can add or revoke them later without
+re-uploading anything.
+
+The publisher's side:
+
+```python
+import fsspec
+
+pub = fsspec.filesystem("bzz", stamp="auto", act=True)
+root = pub.upload("quarterly/")        # a directory of Parquet files, say
+history = pub.act_history
+print(root, history)                   # keep BOTH; the history unlocks the content
+```
+
+`act=True` does two things to every commit and upload: the content is
+encrypted (`encrypt` defaults to on under ACT — more on why below) and the
+root reference is wrapped so that only authorized nodes can resolve it.
+The first protected commit creates a **history** — the record of who holds
+the access key — and later commits on the same instance continue it. To
+continue it from a new process, pass it back: `act=True,
+act_history=history`.
+
+A reader's side (on a node whose key is the publisher's or a grantee's):
+
+```python
+reader = fsspec.filesystem("bzz", act_history=history,
+                           act_publisher=publisher_key)   # from pub.publisher_key()
+df = pd.read_parquet(f"bzz://{root}/q3.parquet", filesystem=reader)
+```
+
+`act_publisher` is the publisher's compressed public key; it defaults to
+the reading node's own key, which is exactly right when the publisher
+reads their own data. Anyone without the history — or reading through a
+node that holds no eligible key — gets `FileNotFoundError`: protected
+content is invisible, not forbidden.
+
+Granting access to others:
+
+```python
+gl = pub.create_grantees([alice_key, bob_key])     # their nodes' public keys
+pub2 = fsspec.filesystem("bzz", stamp="auto", act=True, act_history=gl.history)
+root = pub2.upload("quarterly/")                    # readable by alice, bob, and you
+
+gl = pub.patch_grantees(gl.reference, gl.history, revoke=[bob_key])
+# keep the *new* gl: reference and history both advance on every patch
+```
+
+A node's key is `fs.publisher_key()` (Bee's `GET /addresses` →
+`publicKey`); grantees send you theirs. Bee refuses two patches within the
+same second.
+
+Things worth knowing, all measured against a real node:
+
+- **An ACT reference looks like any other.** It is the real reference
+  encrypted with the access key — 64 hex over plain content, 128 hex over
+  encrypted — so nothing in the URL says "protected". swarmfs treats
+  **every root reference on an instance with ACT options as protected**,
+  and child references (the files inside a manifest) never are, because
+  that is how Bee lays out a protected directory: only the entry point is
+  wrapped.
+- **ACT is access control, not confidentiality.** Under plain ACT the
+  content stays where any node storing its chunks can read it, and the
+  underlying reference is even exposed to authorized readers. That is why
+  `act=True` turns `encrypt` on; pass `encrypt=False` explicitly (you get
+  a warning) if you really want the entry point hidden but the bytes
+  plain.
+- **Only your own node.** Decryption of the reference happens inside the
+  node with *its* private key. A public gateway holds no key of yours, so
+  an ACT instance refuses gateways outright, and `verify=True` is refused
+  too (an ACT reference is not a content address to verify against).
+  `local_store` is likewise incompatible.
+- **The history is the key.** It is on `fs.act_history` and on every
+  `CommitResult`; swarmfs never writes it anywhere for you. Lose it and the
+  content is gone, for the publisher too.
+- **Feeds work unchanged.** A `bzzf://` feed whose writer has `act=True`
+  publishes ACT references; a reader with the history follows it.
+
 ## Mounting Swarm as a folder
 
 Not everything speaks fsspec. A shell pipeline, a text editor, `rsync`, a
@@ -590,6 +674,15 @@ gateway and refused unless you pass `allow_gateway=True`. On that path,
 every chunk you read is verified client-side against its content hash, so
 even an untrusted gateway can't hand you tampered data — but running your
 own light node avoids the question entirely.
+
+**Protected content comes back as "not found"** — ACT makes content
+invisible rather than forbidden. Check, in order: the reader has the
+`act_history` the content was published under (a grantee list's history
+after a patch is a *new* one); `act_publisher` is the publisher's key (it
+defaults to the reading node's own, which is only right for the
+publisher); and the node you read through holds the publisher's or a
+grantee's private key — a gateway never does. A well-formed key that is
+not a real curve point is a `BeeAPIError` 400, not a 404.
 
 **`swarmfs mount` says fusepy or libfuse is missing** — the Python side
 is the `fuse` extra (`pip install "swarmfs[fuse]"`); the C library is a

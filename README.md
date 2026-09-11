@@ -13,7 +13,8 @@ URLs like `bzz://<reference>/path/to/file.parquet`.
 
 **Status: v3.** Read-only `bzz://` access, transactional copy-on-write
 writes (postage stamps, every commit a snapshot), mutable feed-backed
-`bzzf://` mounts, and a **local-first mode**: commits land on local disk
+`bzzf://` mounts, encryption and ACT access control, a read-only FUSE
+mount, and a **local-first mode**: commits land on local disk
 instantly and sync to Swarm in the background — offline is the normal
 mode, `fs.sync()` is the certainty barrier. See the
 [roadmap](ROADMAP.md) and the local-first design in
@@ -147,6 +148,37 @@ ffs = fsspec.filesystem("bzzf", stamp="auto", signer="<private key hex>")
 ffs.pipe_file(f"bzzf://{owner}/my-app/config.json", b'{"v": 2}')
 # readers need no keys — and the URL never changes
 ```
+
+## Access control (ACT)
+
+Swarm's ACT lets a publisher decide *who* can read a reference — by their
+nodes' public keys — and change that list later. In swarmfs it is a
+storage option:
+
+```python
+pub = fsspec.filesystem("bzz", stamp="auto", act=True)
+root = pub.upload("private/")           # an ACT reference; encrypted by default
+history = pub.act_history               # SAVE THIS — it is what unlocks the content
+
+# a grantee's node (or the publisher's own) reads with the history; the
+# publisher's key is needed too and defaults to the reading node's own
+reader = fsspec.filesystem("bzz", act_history=history, act_publisher=pub.publisher_key())
+reader.cat(f"bzz://{root}/report.parquet")
+fsspec.filesystem("bzz").ls(f"bzz://{root}")   # anyone else: FileNotFoundError
+
+gl = pub.create_grantees([friend_public_key])       # a grantee list + its history
+pub2 = fsspec.filesystem("bzz", stamp="auto", act=True, act_history=gl.history)
+gl = pub.patch_grantees(gl.reference, gl.history, revoke=[friend_public_key])
+```
+
+Facts that shape the design, all measured live: an ACT reference is the
+real reference *encrypted*, same length, so it looks like any other; only
+the **root** is wrapped (children resolve normally, and the content itself
+stays plaintext-addressable — which is why `act=True` implies
+`encrypt=True`); reading needs the history *and* the publisher's key, and
+happens through a node holding the publisher's or a grantee's private key
+— so ACT works only against your own node, never a gateway. Losing the
+history loses the content, for the publisher too.
 
 ## Mount it as a folder
 
@@ -313,7 +345,7 @@ read.
 
 ```bash
 pip install -e ".[test]"
-pytest                                   # 395 tests; the live ones skip with no node
+pytest                                   # 408 tests; the live ones skip with no node
 SWARMFS_TEST_BEE=http://localhost:1633 \
 SWARMFS_TEST_STAMP=<batch-id> pytest tests/test_integration.py
 ```

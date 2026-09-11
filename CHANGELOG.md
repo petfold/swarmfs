@@ -22,6 +22,14 @@ claiming more detail than the history holds.
   the new `fuse` extra (fusepy) and a system libfuse 2. Verified against
   the offline fake node, a local Bee 2.8.2 and the public gateway.
 
+- **ACT access control** — `act=True` protects every commit and upload
+  (the root is ACT-wrapped, content encrypted by default); `act_history` +
+  `act_publisher` read protected content; `publisher_key()`,
+  `create_grantees()`, `grantees()`, `patch_grantees()` manage who may read.
+  Client tier: `act=` on reads, `act=`/`act_history=` on uploads (returning
+  `ActUpload`), `addresses`, `grantee_create/get/patch`. New module
+  `swarmfs.act`. Live-validated against Bee 2.8.2.
+
 ### Fixed
 
 - `SwarmClient.health()` accepted only a JSON body; the proxy in front of

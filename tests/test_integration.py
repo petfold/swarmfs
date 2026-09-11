@@ -564,3 +564,84 @@ def test_bucket_occupancy_agrees_with_the_summary_live():
             await client.close()
 
     asyncio.run(main())
+
+
+@pytest.mark.skipif(not STAMP, reason="ACT round trip uploads; needs SWARMFS_TEST_STAMP")
+def test_act_roundtrip_live(tmp_path):
+    """ACT against a real node: protect a directory, read it back through a
+    fresh instance holding only the history (publisher = this node), watch
+    it stay invisible without the headers, continue the history with a
+    second commit and a single-file upload, and manage a grantee list.
+    Pins the facts in swarmfs/act.py: opaque same-length references, the
+    root-only wrapping, the mandatory publisher, the 1-second patch rule."""
+    from swarmfs import SwarmFileSystem
+    from swarmfs.act import GranteeList
+    from swarmfs.exceptions import BeeAPIError
+
+    keys = pytest.importorskip("eth_keys").keys
+    # real curve points: Bee validates Swarm-Act-Publisher and grantee keys
+    # as secp256k1 points and answers 400 "invalid public key" otherwise
+    other_key = keys.PrivateKey(bytes(range(1, 33))).public_key.to_compressed_bytes().hex()
+    grantee = keys.PrivateKey(bytes(range(101, 133))).public_key.to_compressed_bytes().hex()
+
+    d = tmp_path / "private"
+    (d / "data").mkdir(parents=True)
+    (d / "readme.txt").write_bytes(b"members only\n")
+    (d / "data" / "blob.bin").write_bytes(bytes(range(256)) * 40)
+
+    pub = SwarmFileSystem(api_url=BEE, stamp=STAMP, act=True, redundancy=0,
+                          skip_instance_cache=True)
+    root = pub.upload(str(d))
+    history = pub.act_history
+    assert len(root) == 128 and history and len(history) == 64  # act ⇒ encrypt
+    assert pub.commit_log[-1].act_history == history
+    assert pub.cat_file(f"bzz://{root}/readme.txt") == b"members only\n"
+
+    # a fresh reader with the history only — the publisher is this node
+    reader = SwarmFileSystem(api_url=BEE, act_history=history, skip_instance_cache=True)
+    assert sorted(reader.find(f"bzz://{root}")) == [f"{root}/data/blob.bin", f"{root}/readme.txt"]
+    assert reader.cat_file(f"bzz://{root}/data/blob.bin", start=256, end=260) == bytes(range(4))
+    assert reader.info(f"bzz://{root}/data/blob.bin")["size"] == 256 * 40
+    assert reader.act_publisher == pub.publisher_key()
+
+    # invisible without the headers, and with the wrong publisher
+    blind = SwarmFileSystem(api_url=BEE, skip_instance_cache=True)
+    with pytest.raises(FileNotFoundError):
+        blind.ls(f"bzz://{root}")
+    wrong = SwarmFileSystem(api_url=BEE, act_history=history,
+                            act_publisher=other_key, skip_instance_cache=True)
+    with pytest.raises(FileNotFoundError):
+        wrong.ls(f"bzz://{root}")
+    # a well-formed key that is not a curve point is a 400 from the node,
+    # not a 404 — surfaced as BeeAPIError, not as "not found"
+    malformed = SwarmFileSystem(api_url=BEE, act_history=history,
+                                act_publisher="02" + "cd" * 32, skip_instance_cache=True)
+    with pytest.raises(BeeAPIError, match="invalid public key"):
+        malformed.ls(f"bzz://{root}")
+
+    # continuing the history: a second commit and a single-file upload
+    pub.pipe_file(f"bzz://{root}/data/more.txt", b"second commit")
+    head = pub.latest(root)
+    assert head != root and pub.act_history == history
+    assert reader.cat_file(f"bzz://{head}/data/more.txt") == b"second commit"
+    one = tmp_path / "one.txt"
+    one.write_bytes(b"single protected file")
+    ref1 = pub.upload(str(one))
+    assert pub.act_history == history
+    assert reader.cat_file(f"bzz://{ref1}/one.txt") == b"single protected file"
+
+    # grantees: create, inspect, patch (Bee refuses two updates in one second)
+    gl = pub.create_grantees([grantee])
+    assert isinstance(gl, GranteeList) and len(gl.history) == 64
+    assert pub.grantees(gl.reference) == [grantee]
+    time.sleep(1.2)
+    gl2 = pub.patch_grantees(gl.reference, gl.history, add=[pub.publisher_key()])
+    assert gl2.history != gl.history
+    assert sorted(pub.grantees(gl2.reference)) == sorted([grantee, pub.publisher_key()])
+    # publishing into the grantee history: readable with that history
+    member = SwarmFileSystem(api_url=BEE, stamp=STAMP, act=True, act_history=gl2.history,
+                             redundancy=0, skip_instance_cache=True)
+    r2 = member.upload(str(d))
+    assert member.act_history == gl2.history
+    assert SwarmFileSystem(api_url=BEE, act_history=gl2.history, skip_instance_cache=True
+                           ).cat_file(f"bzz://{r2}/readme.txt") == b"members only\n"

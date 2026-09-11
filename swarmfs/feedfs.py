@@ -95,7 +95,9 @@ class SwarmFeedFileSystem(SwarmFileSystem):
     async def _resolve_path(self, path: str) -> tuple[str, str]:
         owner, topic, key, sub = self._parse_feed_path(path)
         await self._refresh_feed(owner, topic, key)
-        return self._resolve_head(key), sub
+        head = self._resolve_head(key)
+        self._register_root(head)  # a feed's payload is a root (ACT-wrapped if protected)
+        return head, sub
 
     async def _refresh_feed(self, owner: bytes, topic: bytes, key: str) -> None:
         """Look up the feed unless the cached resolution is still fresh.

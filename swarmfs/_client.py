@@ -11,6 +11,7 @@ import weakref
 import aiohttp
 from fsspec.asyn import get_loop, sync
 
+from .act import Act, ActUpload, GranteeList
 from .exceptions import BeeAPIError, BeePermissionError, StampError
 
 DEFAULT_API_URL = "http://localhost:1633"
@@ -101,20 +102,29 @@ class SwarmClient:
         raise BeeAPIError(resp.status, what, detail)
 
     async def bytes_get(
-        self, ref: str, start: int | None = None, end: int | None = None
+        self, ref: str, start: int | None = None, end: int | None = None,
+        act: Act | None = None,
     ) -> bytes:
-        """GET /bytes/{ref}, optionally a byte range (end exclusive)."""
+        """GET /bytes/{ref}, optionally a byte range (end exclusive).
+
+        ``act`` sends the ACT headers (history, publisher, timestamp) —
+        for an ACT-protected *root* reference only: a plain reference read
+        with them is a 404, and so is a protected one read without.
+        """
         if start is not None and end is not None and end <= start:
             return b""
         url = f"{self.api_url}/bytes/{ref}"
-        headers = self._range_header(start, end)
+        range_headers = self._range_header(start, end)
+        headers = dict(range_headers)
+        if act is not None:
+            headers.update(act.headers())
         session = await self._get_session()
         async with session.get(url, headers=headers) as resp:
             if resp.status == 416:  # range beyond EOF
                 return b""
             await self._raise_for_status(resp, url)
             data = await resp.read()
-        if headers and resp.status == 200:
+        if range_headers and resp.status == 200:
             # server ignored the Range header; slice locally
             data = data[start or 0 : end]
         return data
@@ -128,7 +138,7 @@ class SwarmClient:
             span = span[:7] + b"\x00"
         return int.from_bytes(span, "little")
 
-    async def bytes_size(self, ref: str) -> int | None:
+    async def bytes_size(self, ref: str, act: Act | None = None) -> int | None:
         """Size of the data at ``ref`` without downloading it.
 
         Reads the root chunk's 8-byte span via /chunks (the span of a root
@@ -137,8 +147,35 @@ class SwarmClient:
         redundancy bits included, in that Content-Length header, which can
         come out negative and make HTTP clients reject the response outright.
         Returns None if neither works (e.g. a restrictive gateway).
+        With ``act`` (an ACT-protected root) there is no chunk to read the
+        span from — the reference is not an address — so it is HEAD /bytes
+        with the ACT headers (Content-Length is the plaintext size there,
+        measured on Bee 2.8.2), falling back to a 1-byte ranged GET.
         """
         session = await self._get_session()
+        if act is not None:
+            url = f"{self.api_url}/bytes/{ref}"
+            try:
+                async with session.head(url, headers=act.headers()) as resp:
+                    await self._raise_for_status(resp, url)
+                    length = int(resp.headers.get("Content-Length", -1))
+                    if length >= 0:
+                        return length
+            except FileNotFoundError:
+                raise
+            except (aiohttp.ClientError, OSError, ValueError):
+                pass
+            headers = {"Range": "bytes=0-0", **act.headers()}
+            async with session.get(url, headers=headers) as resp:
+                await self._raise_for_status(resp, url)
+                await resp.read()
+                content_range = resp.headers.get("Content-Range", "")
+                if "/" in content_range:
+                    try:
+                        return int(content_range.rsplit("/", 1)[1])
+                    except ValueError:
+                        pass
+            return None
         if len(ref) == 128:
             # Encrypted reference: the root chunk's span bytes are
             # ciphertext (meaningless client-side) and HEAD /bytes 404s on
@@ -178,29 +215,37 @@ class SwarmClient:
         return None
 
     async def bzz_get(
-        self, ref: str, path: str = "", start: int | None = None, end: int | None = None
+        self, ref: str, path: str = "", start: int | None = None, end: int | None = None,
+        act: Act | None = None,
     ) -> bytes:
         """GET /bzz/{ref}/{path} — server-side path resolution (follows the
-        manifest's index document when path is empty)."""
+        manifest's index document when path is empty). ``act``: the ACT
+        headers, for a protected root."""
         if start is not None and end is not None and end <= start:
             return b""
         url = f"{self.api_url}/bzz/{ref}/{path}"
-        headers = self._range_header(start, end)
+        range_headers = self._range_header(start, end)
+        headers = dict(range_headers)
+        if act is not None:
+            headers.update(act.headers())
         session = await self._get_session()
         async with session.get(url, headers=headers) as resp:
             if resp.status == 416:
                 return b""
             await self._raise_for_status(resp, url)
             data = await resp.read()
-        if headers and resp.status == 200:
+        if range_headers and resp.status == 200:
             data = data[start or 0 : end]
         return data
 
-    async def bytes_iter(self, ref: str, chunk_size: int = 1 << 20):
-        """Stream /bytes/{ref} in chunks (for downloads to local files)."""
+    async def bytes_iter(self, ref: str, chunk_size: int = 1 << 20,
+                         act: Act | None = None):
+        """Stream /bytes/{ref} in chunks (for downloads to local files).
+        ``act``: the ACT headers, for a protected root."""
         url = f"{self.api_url}/bytes/{ref}"
         session = await self._get_session()
-        async with session.get(url) as resp:
+        headers = act.headers() if act is not None else {}
+        async with session.get(url, headers=headers) as resp:
             await self._raise_for_status(resp, url)
             async for chunk in resp.content.iter_chunked(chunk_size):
                 yield chunk
@@ -216,7 +261,9 @@ class SwarmClient:
         redundancy: int | None = None,
         deferred: bool | None = None,
         encrypt: bool = False,
-    ) -> str:
+        act: bool = False,
+        act_history: str | None = None,
+    ) -> str | ActUpload:
         """POST /bytes — upload a blob, returns its reference (hex).
 
         ``redundancy`` is Bee's erasure-coding level (0–4): parity chunks are
@@ -228,6 +275,13 @@ class SwarmClient:
         encrypts chunk-by-chunk and the returned reference is 128 hex —
         address plus decryption key; whoever holds the full reference can
         read, everyone else stores noise.
+
+        With ``act`` the node wraps the reference in ACT (``swarm-act``):
+        the return value is then an ``ActUpload(reference, history)`` — the
+        protected reference plus the history that unlocks it, newly created
+        unless ``act_history`` continued an existing one. ACT alone does
+        not encrypt the content (see ``swarmfs.act``); combine with
+        ``encrypt``.
         """
         url = f"{self.api_url}/bytes"
         headers = {
@@ -244,10 +298,33 @@ class SwarmClient:
             headers["swarm-deferred-upload"] = "true" if deferred else "false"
         if encrypt:
             headers["swarm-encrypt"] = "true"
+        self._act_upload_headers(headers, act, act_history)
         session = await self._get_session()
         async with session.post(url, data=data, headers=headers) as resp:
             await self._raise_for_status(resp, url)
-            return (await resp.json())["reference"]
+            ref = (await resp.json())["reference"]
+            return self._act_upload_result(ref, resp, act, url)
+
+    @staticmethod
+    def _act_upload_headers(headers: dict, act: bool, act_history: str | None) -> None:
+        if act_history is not None and not act:
+            raise ValueError("act_history given but act=False")
+        if act:
+            headers["swarm-act"] = "true"
+            if act_history is not None:
+                headers["swarm-act-history-address"] = act_history
+
+    @staticmethod
+    def _act_upload_result(ref: str, resp, act: bool, url: str):
+        if not act:
+            return ref
+        history = resp.headers.get("Swarm-Act-History-Address")
+        if not history:
+            raise BeeAPIError(
+                resp.status, url,
+                "swarm-act upload returned no Swarm-Act-History-Address header — "
+                "the node did not apply ACT (too old, or ACT disabled?)")
+        return ActUpload(ref, history)
 
     async def bzz_post(
         self,
@@ -258,14 +335,17 @@ class SwarmClient:
         encrypt: bool = False,
         pin: bool = False,
         redundancy: int | None = None,
-    ) -> str:
+        act: bool = False,
+        act_history: str | None = None,
+    ) -> str | ActUpload:
         """POST /bzz — upload a single file, returns its reference (hex).
 
         Bee wraps the file in a manifest with the filename as its index
         document, so both ``/bzz/{ref}/`` and ``/bzz/{ref}/{filename}``
         resolve to it. ``data`` may be bytes or a (binary) file object,
         which aiohttp streams. With ``encrypt`` the returned reference is
-        128 hex chars (reference + decryption key).
+        128 hex chars (reference + decryption key). With ``act`` the result
+        is an ``ActUpload(reference, history)`` (see ``bytes_post``).
         """
         url = f"{self.api_url}/bzz"
         params = {"name": filename} if filename else {}
@@ -279,10 +359,66 @@ class SwarmClient:
             headers["swarm-pin"] = "true"
         if redundancy is not None:
             headers["swarm-redundancy-level"] = str(redundancy)
+        self._act_upload_headers(headers, act, act_history)
         session = await self._get_session()
         async with session.post(url, data=data, params=params, headers=headers) as resp:
             await self._raise_for_status(resp, url)
-            return (await resp.json())["reference"]
+            ref = (await resp.json())["reference"]
+            return self._act_upload_result(ref, resp, act, url)
+
+    # ------------------------------------------------------------------ ACT
+
+    async def addresses(self) -> dict:
+        """GET /addresses — the node's overlay/underlay addresses, ethereum
+        address and public keys. ``publicKey`` is the compressed key that
+        identifies this node as an ACT publisher (or grantee)."""
+        url = f"{self.api_url}/addresses"
+        session = await self._get_session()
+        async with session.get(url) as resp:
+            await self._raise_for_status(resp, url)
+            return await resp.json()
+
+    async def grantee_create(self, grantees: list[str], stamp: str) -> GranteeList:
+        """POST /grantee — create an ACT grantee list from compressed public
+        keys. Returns the list reference and the history whose access key
+        these grantees hold; protected uploads pass that history."""
+        url = f"{self.api_url}/grantee"
+        headers = {"swarm-postage-batch-id": stamp, "content-type": "application/json"}
+        session = await self._get_session()
+        async with session.post(url, json={"grantees": list(grantees)},
+                                headers=headers) as resp:
+            await self._raise_for_status(resp, url)
+            body = await resp.json()
+            return GranteeList(body["ref"], body["historyref"])
+
+    async def grantee_get(self, reference: str) -> list[str]:
+        """GET /grantee/{ref} — the public keys on a grantee list."""
+        url = f"{self.api_url}/grantee/{reference}"
+        session = await self._get_session()
+        async with session.get(url) as resp:
+            await self._raise_for_status(resp, url)
+            body = await resp.json()
+            return list(body["grantees"] if isinstance(body, dict) else body)
+
+    async def grantee_patch(
+        self, reference: str, history: str, stamp: str,
+        add: list[str] | None = None, revoke: list[str] | None = None,
+    ) -> GranteeList:
+        """PATCH /grantee/{ref} — add and/or revoke keys. Returns the *new*
+        list reference and history (both advance). Bee rejects two patches
+        within the same second."""
+        url = f"{self.api_url}/grantee/{reference}"
+        headers = {
+            "swarm-postage-batch-id": stamp,
+            "swarm-act-history-address": history,
+            "content-type": "application/json",
+        }
+        body = {"add": list(add or []), "revoke": list(revoke or [])}
+        session = await self._get_session()
+        async with session.patch(url, json=body, headers=headers) as resp:
+            await self._raise_for_status(resp, url)
+            out = await resp.json()
+            return GranteeList(out["ref"], out["historyref"])
 
     async def stamps_list(self) -> list[dict]:
         """GET /stamps — the node's postage batches."""
@@ -501,9 +637,9 @@ class SyncSwarmClient:
         """Blocking ``SwarmClient.close`` — close the HTTP session."""
         sync(self.loop, self._client.close)
 
-    def bytes_iter(self, ref: str, chunk_size: int = 1 << 20):
+    def bytes_iter(self, ref: str, chunk_size: int = 1 << 20, act: Act | None = None):
         """Blocking iterator over ``SwarmClient.bytes_iter`` chunks."""
-        ait = self._client.bytes_iter(ref, chunk_size).__aiter__()
+        ait = self._client.bytes_iter(ref, chunk_size, act=act).__aiter__()
         while True:
             try:
                 yield sync(self.loop, ait.__anext__)
@@ -543,6 +679,10 @@ for _name in (
     "feed_head",
     "chunk_get",
     "soc_post",
+    "addresses",
+    "grantee_create",
+    "grantee_get",
+    "grantee_patch",
 ):
     setattr(SyncSwarmClient, _name, _sync_method(_name))
 del _name

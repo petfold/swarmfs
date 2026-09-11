@@ -23,6 +23,7 @@ import mimetypes
 import os
 import posixpath
 import shutil
+import warnings
 import weakref
 
 from fsspec.asyn import AsyncFileSystem, sync
@@ -32,6 +33,7 @@ from fsspec.transaction import Transaction
 from fsspec.utils import stringify_path
 
 from ._client import DEFAULT_API_URL, SwarmClient, SyncSwarmClient
+from .act import Act, ActManager, ActReader, ActUpload
 from ._listing import ListingBackend, detect_listing_backend
 from .commit import CommitEngine, CommitResult, StagedWrite
 from .stamps import StampManager
@@ -151,6 +153,7 @@ class SwarmFileSystem(AsyncFileSystem):
         parity chunks are added so content survives missing chunks. Defaults
         to 2 ("strong"); pass 0 to disable, or None for the node's default.
     encrypt:
+        (default None = ``act``, i.e. off unless ACT-protecting.)
         Encrypt every upload (files AND manifest nodes) node-side; commits
         and uploads then return 128-hex references — address plus
         decryption key. Whoever holds the full reference can read (the
@@ -167,6 +170,24 @@ class SwarmFileSystem(AsyncFileSystem):
     verify:
         Client-side chunk verification (BMT-hash every fetched chunk against
         its reference). Default: on for gateways, off for your own node.
+    act, act_history, act_publisher, act_timestamp:
+        Access control (Swarm ACT; see ``swarmfs.act``). ``act=True``
+        protects every commit and upload: the new root goes up with
+        ``swarm-act`` and comes back as an ACT reference readable only by
+        the publisher's and the grantees' nodes. The first protected
+        commit creates a *history* (``fs.act_history``, also on each
+        ``CommitResult``) — persist it, it is what unlocks the content;
+        pass it back as ``act_history`` to keep publishing into the same
+        one (or pass the history of a grantee list). Reading protected
+        content needs ``act_history`` plus ``act_publisher`` (the
+        publisher's compressed public key; defaults to this node's own —
+        right when you are the publisher). With either set, **every root
+        reference on this instance is treated as protected**; child
+        references never are. ``act_timestamp`` reads as of a moment in
+        the history. ACT alone leaves content plaintext-addressable, so
+        ``act=True`` turns ``encrypt`` on unless explicitly ``False``.
+        Only through your own node (the node decrypts with its key);
+        incompatible with ``verify`` and ``local_store``.
     client:
         Injection seam for a pre-built ``SwarmClient`` (used by tests).
     local_store:
@@ -195,11 +216,15 @@ class SwarmFileSystem(AsyncFileSystem):
         stamp: str | None = None,
         pin: bool = False,
         redundancy: int | None = 2,
-        encrypt: bool = False,
+        encrypt: bool | None = None,
         allow_gateway: bool = False,
         verify: bool | None = None,
         client: SwarmClient | None = None,
         local_store: str | None = None,
+        act: bool = False,
+        act_history: str | None = None,
+        act_publisher: str | None = None,
+        act_timestamp: int | None = None,
         asynchronous: bool = False,
         loop=None,
         **storage_options,
@@ -217,7 +242,37 @@ class SwarmFileSystem(AsyncFileSystem):
         if redundancy is not None and redundancy not in range(5):
             raise ValueError(f"redundancy must be 0-4, got {redundancy!r}")
         self.redundancy = redundancy
+        # ACT (swarmfs.act): act=True protects writes; act_history (+
+        # publisher) unlocks reads. Either makes this an "ACT instance":
+        # every root reference it sees is protected, children never are.
+        self.act = act
+        self.act_history = (act_history.lower().removeprefix("0x")
+                            if act_history else None)
+        self.act_publisher = act_publisher
+        self.act_timestamp = act_timestamp
+        self.act_mode = act or self.act_history is not None
+        self._act_roots: set[str] = set()
+        if self.act_history is not None and act_publisher is not None:
+            Act(self.act_history, act_publisher)  # validate early
+        if encrypt is None:
+            # ACT wraps only the root reference; the content itself stays
+            # plaintext-addressable (its reference is even the ETag of a
+            # protected read). Confidentiality is swarm-encrypt, so protect
+            # ⇒ encrypt unless the caller explicitly declines.
+            encrypt = act
+        elif act and not encrypt:
+            warnings.warn(
+                "act=True with encrypt=False: ACT hides the root reference "
+                "but the content stays plaintext-addressable (any node "
+                "storing the chunks can read it, and the underlying "
+                "reference is exposed to authorized readers) — pass "
+                "encrypt=True for confidentiality", stacklevel=2)
         self.encrypt = encrypt
+        if self.act_mode and verify:
+            raise ValueError(
+                "verify=True cannot be combined with ACT: an ACT reference is "
+                "an encrypted reference, not a content address, so the root "
+                "cannot be checked against it")
         self.allow_gateway = allow_gateway
         self.verify = verify
         self.verify_active: bool | None = None  # resolved by _setup
@@ -230,6 +285,11 @@ class SwarmFileSystem(AsyncFileSystem):
         self._local = None
         self._syncer = None
         if local_store is not None:
+            if self.act_mode:
+                raise ValueError(
+                    "local_store cannot be combined with ACT: an ACT reference "
+                    "is not a content address, and the node — not this "
+                    "process — holds the key that resolves it")
             if encrypt:
                 raise ValueError(
                     "local_store cannot be combined with encrypt=True: "
@@ -257,7 +317,8 @@ class SwarmFileSystem(AsyncFileSystem):
         else:
             self._engine = CommitEngine(
                 self.client, StampManager(self.client), pin=pin,
-                redundancy=redundancy, encrypt=encrypt
+                redundancy=redundancy, encrypt=encrypt, act=act,
+                act_publisher=act_publisher,
             )
         # staging, keyed by the *origin* root of each manifest lineage
         self._staged: dict[str, dict[str, StagedWrite]] = {}
@@ -332,7 +393,10 @@ class SwarmFileSystem(AsyncFileSystem):
             )
         if not self._is_pseudo(ref):
             _validate_ref(ref)
-        return self._resolve_head(ref), sub.strip("/")
+        head = self._resolve_head(ref)
+        self._register_root(ref)
+        self._register_root(head)
+        return head, sub.strip("/")
 
     async def _resolve_path(self, path: str) -> tuple[str, str]:
         """Async seam over _split_ref — bzzf:// overrides this with a feed
@@ -345,6 +409,72 @@ class SwarmFileSystem(AsyncFileSystem):
 
     def _origin_of(self, ref: str) -> str:
         return self._origin.get(ref, ref)
+
+    # ------------------------------------------------------------------ ACT
+
+    def _register_root(self, ref: str) -> None:
+        """Remember ``ref`` as a *root* on an ACT instance: roots get the ACT
+        headers, the child references inside them never do."""
+        if self.act_mode and ref and not self._is_pseudo(ref):
+            self._act_roots.add(ref.lower())
+
+    def _current_act(self) -> Act | None:
+        if not self.act_mode or self.act_history is None or self.act_publisher is None:
+            return None
+        return Act(self.act_history, self.act_publisher, self.act_timestamp)
+
+    def _act_for(self, ref: str) -> Act | None:
+        return self._current_act() if ref.lower() in self._act_roots else None
+
+    def _adopt_act(self, history: str | None, root: str | None) -> None:
+        """After a protected write: keep the history (the first commit
+        creates it) and register the new root."""
+        if history:
+            self.act_history = history.lower()
+        if root:
+            self._register_root(root)
+
+    def _act_manager(self) -> ActManager:
+        return ActManager(self.client, StampManager(self.client), self.stamp)
+
+    async def _publisher_key(self) -> str:
+        await self._setup()
+        return await self._act_manager().publisher()
+
+    def publisher_key(self) -> str:
+        """This node's compressed public key — what readers of content this
+        node protects pass as ``act_publisher`` (and what another publisher
+        adds to a grantee list to let this node read)."""
+        return sync(self.loop, self._publisher_key)
+
+    async def _create_grantees(self, keys):
+        await self._setup()
+        return await self._act_manager().create_grantees(keys)
+
+    def create_grantees(self, keys):
+        """Create an ACT grantee list from compressed public keys; returns
+        ``GranteeList(reference, history)``. Publish with
+        ``act_history=<that history>`` and those keys' nodes can read.
+        Spends a stamp (resolved like commits: ``stamp`` or auto)."""
+        return sync(self.loop, self._create_grantees, keys)
+
+    async def _grantees(self, reference: str):
+        await self._setup()
+        return await self._act_manager().grantees(reference)
+
+    def grantees(self, reference: str) -> list[str]:
+        """The public keys on a grantee list (free: a pure question)."""
+        return sync(self.loop, self._grantees, reference)
+
+    async def _patch_grantees(self, reference, history, add, revoke):
+        await self._setup()
+        return await self._act_manager().patch_grantees(reference, history, add, revoke)
+
+    def patch_grantees(self, reference: str, history: str, add=(), revoke=()):
+        """Add/revoke grantee keys; returns the **new** ``GranteeList`` —
+        reference and history both advance, keep the new ones. Bee refuses
+        two patches within one second."""
+        return sync(self.loop, self._patch_grantees, reference, history, add, revoke)
 
     def _overlay(self, ref: str) -> tuple[dict[str, StagedWrite], set[str]]:
         okey = self._origin_of(ref)
@@ -403,10 +533,29 @@ class SwarmFileSystem(AsyncFileSystem):
                 "To read through this gateway anyway, pass allow_gateway=True "
                 "(chunk verification is then enabled by default)."
             )
+        if self.act_mode:
+            if not trusted:
+                raise PermissionError(
+                    f"{self.api_url} is not your own node, and ACT-protected "
+                    "content can only be read through a node holding the "
+                    "publisher's or a grantee's key — the node decrypts, not "
+                    "this process. Point api_url at your light node.")
+            if self.act_publisher is None:
+                # the publisher defaults to *this* node — right whenever the
+                # reader is the publisher; grantees pass the publisher's key
+                self.act_publisher = (await self.client.addresses())["publicKey"]
+                if self.act_history is not None:
+                    Act(self.act_history, self.act_publisher)  # validate
+            if isinstance(self._engine, CommitEngine):
+                self._engine.act_publisher = self.act_publisher
         self.trusted = trusted
         self.verify_active = self.verify if self.verify is not None else not trusted
+        if self.act_mode:
+            self.verify_active = False  # refused at construction if forced
         self._reader = (self._verifying_reader() if self.verify_active
                         else self.client)
+        if self.act_mode:
+            self._reader = ActReader(self._reader, self._current_act, self._act_roots)
         if self._local is not None:
             # Local-first reads: refs the store holds are served from
             # disk (offline read-your-writes); foreign refs go to the
@@ -434,6 +583,7 @@ class SwarmFileSystem(AsyncFileSystem):
         of the raw-ref primitive (grown for ontodag-fs, which was
         reaching into `_read_reference`); use `cat`/`open` for paths
         inside manifests."""
+        self._register_root(ref)  # a raw reference handed in is a root
         return sync(self.loop, self._read_reference, ref, start, end)
 
     async def _reference_size(self, ref: str) -> int | None:
@@ -443,6 +593,7 @@ class SwarmFileSystem(AsyncFileSystem):
         """Size in bytes of the content behind a raw `ref`, through the
         same reader (local-first answers from the store without reading
         the blob; otherwise a header-only request)."""
+        self._register_root(ref)
         return sync(self.loop, self._reference_size, ref)
 
     async def _get_backend(self) -> ListingBackend:
@@ -539,7 +690,9 @@ class SwarmFileSystem(AsyncFileSystem):
             head = self.latest(okey)
             real_root = None if self._is_pseudo(head) else head
             try:
-                res = await self._engine.commit(real_root, writes, removes, stamp=self.stamp)
+                res = await self._engine.commit(
+                    real_root, writes, removes, stamp=self.stamp,
+                    **({"act_history": self.act_history} if self.act else {}))
             except BaseException:
                 # a failed commit (e.g. no usable stamp) must not lose staged data
                 restored = self._staged.setdefault(okey, {})
@@ -550,6 +703,7 @@ class SwarmFileSystem(AsyncFileSystem):
             if res.new_root != head:
                 self._root_map[head] = res.new_root
                 self._origin[res.new_root] = okey
+            self._adopt_act(res.act_history, res.new_root)
             self.commit_log.append(res)
             await self._after_commit(okey, res)
         self.invalidate_cache()
@@ -803,7 +957,7 @@ class SwarmFileSystem(AsyncFileSystem):
                     "bare-reference reads resolve server-side (/bzz) and cannot "
                     "be verified — address the file by its explicit path"
                 )
-            return await self.client.bzz_get(ref, "", start, end)
+            return await self.client.bzz_get(ref, "", start, end, act=self._act_for(ref))
         backend = await self._get_backend()
         st = await backend.stat(ref, sub)
         if st is None:
@@ -928,8 +1082,12 @@ class SwarmFileSystem(AsyncFileSystem):
             enc = encrypt or self.encrypt
             if red != engine.redundancy or enc != engine.encrypt:
                 engine = CommitEngine(self.client, engine.stamps, pin=self.pin,
-                                      redundancy=red, encrypt=enc)
-            res = await engine.commit(None, writes, [], stamp=self.stamp)
+                                      redundancy=red, encrypt=enc, act=self.act,
+                                      act_publisher=self.act_publisher)
+            res = await engine.commit(
+                None, writes, [], stamp=self.stamp,
+                **({"act_history": self.act_history} if self.act else {}))
+            self._adopt_act(res.act_history, res.new_root)
             self.commit_log.append(res)
             return res.new_root
 
@@ -938,7 +1096,7 @@ class SwarmFileSystem(AsyncFileSystem):
         batch = await self._engine.stamps.resolve(self.stamp)
         ct = content_type or mimetypes.guess_type(lpath)[0] or "application/octet-stream"
         with open(lpath, "rb") as f:
-            return await self.client.bzz_post(
+            res = await self.client.bzz_post(
                 f,
                 batch,
                 filename=os.path.basename(lpath),
@@ -946,7 +1104,13 @@ class SwarmFileSystem(AsyncFileSystem):
                 encrypt=encrypt or self.encrypt,
                 pin=self.pin,
                 redundancy=red,
+                act=self.act,
+                act_history=self.act_history if self.act else None,
             )
+        if isinstance(res, ActUpload):
+            self._adopt_act(res.history, res.reference)
+            return res.reference
+        return res
 
     def upload(
         self,

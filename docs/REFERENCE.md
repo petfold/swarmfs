@@ -63,7 +63,11 @@ Storage options (constructor / `fsspec.filesystem("bzz", ...)`):
 | `stamp` | None (= `"auto"` at commit) | batch id, or auto-pick the usable batch with longest TTL |
 | `pin` | False | ask the node to pin uploads |
 | `redundancy` | 2 | erasure-coding level 0–4; **must be 0 with `local_store`** |
-| `encrypt` | False | node-side encryption for every write (files and manifest nodes); refs become 128-hex (address + key). A lineage never mixes; incompatible with `local_store` and refused by `verify` |
+| `encrypt` | None (= `act`) | node-side encryption for every write (files and manifest nodes); refs become 128-hex (address + key). A lineage never mixes; incompatible with `local_store` and refused by `verify`. Defaults to on under ACT |
+| `act` | False | protect every commit/upload: the new root is ACT-wrapped (readable by the publisher's and grantees' nodes only). First commit creates a history → `fs.act_history` |
+| `act_history` | None | the history that unlocks protected roots (reading) / to continue publishing into (with `act=True`). Makes this an ACT instance: **every root reference is treated as protected**, children never |
+| `act_publisher` | None (= this node's key) | the publisher's compressed public key (66 hex), mandatory for protected reads; defaults to the reading node's own |
+| `act_timestamp` | None | read as of a moment in the history (`swarm-act-timestamp`) |
 | `allow_gateway` | False | explicit opt-in for a non-owned endpoint |
 | `verify` | None | BMT-verify fetched chunks; auto: on for gateways, off for own node |
 | `local_store` | None | path (or `LocalStore`) — local-first mode: offline commits, background push, local-first reads |
@@ -83,9 +87,15 @@ Methods beyond the fsspec standard surface:
 | `SwarmFileSystem.reference_size` | `(ref)` | size behind a raw reference, same path (local-first answers without reading the blob). |
 | `SwarmFileSystem.discard_staged` | `()` | drop staged writes without committing. |
 | `SwarmFileSystem.modified` | `(path)` | fixed epoch constant (content is immutable at a ref); checks existence. |
+| `SwarmFileSystem.publisher_key` | `()` | this node's compressed public key — what readers pass as `act_publisher` for content this node protects, and what another publisher adds as a grantee. |
+| `SwarmFileSystem.create_grantees` | `(keys)` | ACT: create a grantee list → `GranteeList(reference, history)`; publish with `act_history=<that history>`. Spends a stamp. |
+| `SwarmFileSystem.grantees` | `(reference)` | ACT: the public keys on a grantee list (free). |
+| `SwarmFileSystem.patch_grantees` | `(reference, history, add=(), revoke=())` | ACT: add/revoke keys → the **new** `GranteeList` (both fields advance). Bee refuses two patches within one second. |
 
 `fs.transaction` batches writes into one commit per lineage; rollback
-discards without uploading. `fs.commit_log` lists `CommitResult`s.
+discards without uploading. `fs.commit_log` lists `CommitResult`s (with
+`act_history` set on protected commits; `fs.act_history` is the current
+one).
 `SwarmFeedFileSystem` adds `signer=` (owner's private key hex, required
 for writes) and `feed_ttl=` (feed resolution cache, 15 s); feeds are
 last-write-wins. In local-first mode the feed update publishes only after
@@ -99,7 +109,9 @@ expose Bee endpoints directly: `bytes_get`, `bytes_post` (with
 `chunk_get`, `soc_post`, `feed_head`, `stamps_list`, `stamp_get`,
 `stamp_buy`, `stamp_topup`, `stamp_dilute`, `stamp_buckets`,
 `stewardship_get`, `tag_create`, `tag_get`, `chainstate`, `wallet`,
-`health`, `close`. A test keeps the two surfaces in lockstep.
+`addresses`, `grantee_create`, `grantee_get`, `grantee_patch`, `health`,
+`close`. A test keeps the two surfaces in lockstep. ACT: the reads take
+`act=` (an `act.Act`), the uploads `act=`/`act_history=` (see §12).
 
 ## 6. Stamps (policy tier, `swarmfs.stamps`)
 
@@ -200,6 +212,31 @@ surface: swarmlite builds its snapshot history and publish path on it
 | `FileNotFoundError` | path/reference not found (fsspec semantics). |
 | `PermissionError` | endpoint looks like a gateway and `allow_gateway` is False. |
 | `ConnectionError` | node unreachable at first contact (except in local-first mode, where offline is normal). |
+| `PermissionError` | an ACT instance pointed at a gateway: protected content resolves only inside a node holding an eligible key. |
+
+## 12. Access control (`swarmfs.act`)
+
+Swarm ACT as Bee 2.8.x implements it (measured live; details in the module
+docstring and CLAUDE.md): an ACT reference is the real reference encrypted
+with an access key — same length, opaque — readable only with the
+publisher's **history** and **public key**, through a node holding the
+publisher's or a grantee's private key. Only the root is wrapped; children
+resolve normally; content stays plaintext-addressable unless also
+encrypted (so `act=True` ⇒ `encrypt=True`).
+
+| name | signature | semantics |
+|---|---|---|
+| `act.Act` | `(history, publisher, timestamp=None)` | the read-side header bundle; validates shapes (64-hex history, 66-hex compressed key); `.headers()` → the three/four `swarm-act-*` headers. |
+| `act.ActUpload` | `(reference, history)` | what a protected upload returns (`bytes_post`/`bzz_post` with `act=True`). |
+| `act.GranteeList` | `(reference, history)` | a grantee list's reference and history; both advance on every patch. |
+| `act.ActReader` | `(inner, act_of, roots)` | reader wrapper: sends the ACT headers on references in `roots` only. The fs registers URL roots, feed heads, commit results and raw-reference reads there. |
+| `act.ActManager` | `(client, stamps, stamp=None)` | grantee management with stamp policy: `publisher()`, `grantees(reference)`, `create_grantees(keys)`, `patch_grantees(reference, history, add, revoke)`. |
+| `act.validate_grantee` | `(key)` | normalize/validate a compressed public key (Bee additionally checks it is a curve point: 400 otherwise). |
+
+Client tier: `bytes_get`/`bytes_size`/`bytes_iter`/`bzz_get` take `act=`;
+`bytes_post`/`bzz_post` take `act=`, `act_history=` and then return an
+`ActUpload`; `addresses`, `grantee_create`, `grantee_get`, `grantee_patch`
+are the raw endpoints (sync twins generated).
 
 ## 11. FUSE mount (`swarmfs.fuse`, `swarmfs mount`)
 

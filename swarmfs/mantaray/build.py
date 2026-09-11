@@ -167,12 +167,16 @@ async def remove(node: Node, path: bytes, load: Loader | None = None) -> None:
         del node.forks[path[0]]
 
 
-async def save(node: Node, saver: Saver) -> bytes:
+async def save(node: Node, saver: Saver, root_saver: Saver | None = None) -> bytes:
     """Persist a trie depth-first; returns the root reference.
 
     Only forks with an in-memory child (freshly built, or materialized by a
     patch) are re-serialized; everything else is written by its existing
     reference — this is what keeps single-file changes cheap.
+
+    ``root_saver``, when given, stores the top-level node instead of
+    ``saver`` — for a root that must go up differently from its children
+    (ACT protection wraps the root reference only).
     """
     for b in sorted(node.forks):
         f = node.forks[b]
@@ -182,5 +186,5 @@ async def save(node: Node, saver: Saver) -> bytes:
             f.ref = f.node.ref
             f.node_type = f.node.node_type
             f.metadata = f.node.metadata
-    node.ref = await saver(marshal(node))
+    node.ref = await (root_saver or saver)(marshal(node))
     return node.ref
