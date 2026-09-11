@@ -139,8 +139,10 @@ chunk. This is the single biggest piece of real engineering in the project.
   against doesn't exist at this tier).
   Convenience methods reach straight down to `SwarmClient`, skipping the middle
   layer when it adds nothing — but the fs object stays the single enforcement
-  point for stamp/gateway/verification policy. No swarmfs CLI: that's
-  swarm-cli's job (scope boundary, deliberate).
+  point for stamp/gateway/verification policy. No swarmfs CLI for stamps,
+  uploads or feeds: that's swarm-cli's job (scope boundary, deliberate). The
+  one console script, `swarmfs mount`, exists because a mount is a *process*,
+  not a library call — see "Standalone FUSE mount" below.
 - **Exception taxonomy** (`swarmfs/exceptions.py`, exported from the package
   root): `SwarmError(OSError)` is the base for everything node/network —
   OSError so fsspec's and our own `except OSError` seams keep working.
@@ -248,7 +250,39 @@ endpoints already exist.
 - **Scope boundary holds**: monitoring/CLI/expiry policy and the
   batch↔publication mapping belong to callers (swarmlite), not here. swarmfs
   offers `list_batches()` + `StampInfo.problem(min_ttl)` as the primitive and
-  stops there — there is still no swarmfs CLI, by decision.
+  stops there — still no stamp CLI in swarmfs, by decision (the only console
+  script is `swarmfs mount`).
+
+## Standalone FUSE mount (decided, implemented 2026-09-11)
+
+`swarmfs/fuse.py` + `swarmfs/cli.py`: `swarmfs mount <url> <mountpoint>` /
+`swarmfs.fuse.mount()`, fsspec's generic `FUSEr` subclassed, not replaced.
+Decisions:
+
+- **Read-only, enforced twice** (kernel `ro` flag + EROFS from every
+  mutating op). `bzz://` is immutable by construction; `bzzf://` mounts
+  are a *live view* that follows the feed (`feed_ttl`), still read-only.
+  A writable mount is a plausible follow-up but fsspec's FUSEr write path
+  cannot be reused (it `seek()`s a write-mode buffered file, which raises;
+  it only ever worked for memory files) and `mkdir` would need phantom
+  directories — so it was left out rather than half-done.
+- **Fail in the terminal, not in the mount**: the path is resolved with
+  `fs.info` before `FUSE()` is called, so a bad ref / unreachable node /
+  refused gateway raises swarmfs's normal message; the CLI prints one line
+  and exits 1.
+- **Attributes**: `0444`/`0555`, real uid/gid, sizes from `info`, and the
+  mount time as a constant timestamp (fsspec's `time.time()`-per-`getattr`
+  makes immutable content look like it changes). `kernel_cache` for
+  `bzz://` only. Errors are mapped to errno in every op — fusepy cannot
+  handle `SwarmError`'s `errno=None` (its handler does `e.errno > 0`).
+- **Requires libfuse 2** via fusepy (`fuse` extra) — the caveat is in the
+  README and User Guide; the module imports cleanly without it so the CLI
+  can still explain what to install.
+- **Live fact (2026-09-11)**: `api.gateway.ethswarm.org/health` returns
+  `text/plain` `OK` from its Express proxy, not Bee's JSON; `health()` now
+  treats any 2xx as healthy. Found by the roadmap's gateway check.
+- Tests: `pytest -m fuse` for the three kernel-mount tests (skip naming the
+  missing piece when FUSE is unavailable; CI installs libfuse2).
 
 ## `modified()` (decided, implemented)
 
@@ -419,8 +453,10 @@ See `ROADMAP.md`. Short version:
   `LocalFirstCommitEngine`, `fs.sync()` is the barrier, bzzf feeds publish only after
   network confirmation, and reads are local-first for known refs (offline
   read-your-writes incl. `ls` and ranges; foreign refs still read through the node).
-- **later** encrypted refs (128-hex), ACT, redundancy level as write kwarg, gateway fallback,
-  wire up the server-side listing endpoint when it lands.
+- **Standalone FUSE mount (shipped 2026-09-11)** `swarmfs mount` / `swarmfs.fuse` —
+  read-only, fsspec's FUSEr subclassed; see the section above.
+- **later** ACT, redundancy level as write kwarg, gateway fallback, a writable
+  FUSE mount, wire up the server-side listing endpoint when it lands.
 
 ## Working agreements for Claude Code
 

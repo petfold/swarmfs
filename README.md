@@ -31,6 +31,7 @@ the code by the test suite, and the right document to hand to an AI agent.
 
 ```bash
 pip install swarmfs            # or: pip install "swarmfs[feeds]" for signed feeds
+                               #     pip install "swarmfs[fuse]"  for `swarmfs mount`
 ```
 
 ## Upload and download a file
@@ -146,6 +147,36 @@ ffs = fsspec.filesystem("bzzf", stamp="auto", signer="<private key hex>")
 ffs.pipe_file(f"bzzf://{owner}/my-app/config.json", b'{"v": 2}')
 # readers need no keys — and the URL never changes
 ```
+
+## Mount it as a folder
+
+For everything that is not Python — a shell, an editor, `rsync`, a tool
+that only takes a local path — a reference or a feed can be mounted as an
+ordinary directory:
+
+```bash
+pip install "swarmfs[fuse]"                    # plus libfuse2 (below)
+mkdir ~/mnt/dataset
+swarmfs mount bzz://<reference> ~/mnt/dataset  # or a bare 64-hex reference
+ls -la ~/mnt/dataset; head ~/mnt/dataset/data/part-00000.parquet
+fusermount -u ~/mnt/dataset                    # or Ctrl-C the mount
+```
+
+The mount is **read-only**: a `bzz://` reference is immutable by
+construction, and a `bzzf://<owner>/<topic>` mount is a *live view* of the
+feed — it follows updates (`--feed-ttl`, default 15 s) without ever
+changing URL, but writing through it is not supported. Files are `0444`,
+directories `0555`, sizes are real, reads are ranged (the kernel and fsspec
+both cache), and `simplecache::bzz://<ref>` mounts with a local disk cache
+for free. From Python the same thing is `swarmfs.fuse.mount(url,
+mountpoint)`; a gateway works too (`--api-url … --allow-gateway`, with
+chunk verification on).
+
+*Caveat:* FUSE support comes from fsspec's generic wrapper over
+[fusepy](https://github.com/fusepy/fusepy), which needs a system
+**libfuse 2** — `apt install libfuse2` (`libfuse2t64` on Ubuntu 24.04+),
+macFUSE on macOS; no Windows. If either is missing, `swarmfs mount` says so
+and exits; the rest of swarmfs is unaffected.
 
 ## Addressing content offline, and buying stamps
 
@@ -282,7 +313,7 @@ read.
 
 ```bash
 pip install -e ".[test]"
-pytest                                   # 385 tests; the live ones skip with no node
+pytest                                   # 395 tests; the live ones skip with no node
 SWARMFS_TEST_BEE=http://localhost:1633 \
 SWARMFS_TEST_STAMP=<batch-id> pytest tests/test_integration.py
 ```

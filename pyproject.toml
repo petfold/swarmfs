@@ -41,6 +41,13 @@ dependencies = [
 feeds = [
     "eth-keys>=0.4",
 ]
+# `swarmfs mount`: fsspec's FUSE wrapper needs fusepy, which in turn needs a
+# system libfuse **2** (apt install libfuse2 / libfuse2t64; macFUSE on macOS)
+# — the C library is not pip-installable, hence the extra rather than a
+# base dependency.
+fuse = [
+    "fusepy>=3",
+]
 test = [
     "pytest>=7",
     "pandas",
@@ -49,11 +56,17 @@ test = [
     "zarr>=3",
     "xarray",
     "swarmfs[feeds]",
+    "swarmfs[fuse]",
 ]
 
 [project.entry-points."fsspec.specs"]
 bzz = "swarmfs:SwarmFileSystem"
 bzzf = "swarmfs:SwarmFeedFileSystem"
+
+# The one console script: `swarmfs mount` — a mount is a process, not a
+# library call. Everything else stays swarm-cli's job (see CLAUDE.md).
+[project.scripts]
+swarmfs = "swarmfs.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/petfold/swarmfs"
@@ -63,6 +76,9 @@ Issues = "https://github.com/petfold/swarmfs/issues"
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+markers = [
+    "fuse: mounts through the kernel — needs fusepy, libfuse 2, /dev/fuse (skips otherwise)",
+]
 
 [tool.hatch.build.targets.sdist]
 exclude = [".claude", ".pytest_cache", ".venv"]

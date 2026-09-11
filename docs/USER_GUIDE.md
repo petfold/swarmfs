@@ -30,6 +30,7 @@ here, that's a bug — please open an issue.
 - [DuckDB](#duckdb)
 - [Writing more than one file at a time](#writing-more-than-one-file-at-a-time)
 - [Getting a stable URL: feeds](#getting-a-stable-url-feeds)
+- [Mounting Swarm as a folder](#mounting-swarm-as-a-folder)
 - [Also works with](#also-works-with)
 - [Troubleshooting](#troubleshooting)
 - [Where to go next](#where-to-go-next)
@@ -427,6 +428,54 @@ feed's owner is allowed to update it. See the
 picture, including what "last-write-wins" means if two processes update the
 same feed concurrently.
 
+## Mounting Swarm as a folder
+
+Not everything speaks fsspec. A shell pipeline, a text editor, `rsync`, a
+compiled tool that wants a path — for those, a reference (or a feed) can
+be mounted as a plain directory with FUSE:
+
+```bash
+pip install "swarmfs[fuse]"        # and the system library: apt install libfuse2
+                                   # (libfuse2t64 on Ubuntu 24.04+; macFUSE on macOS)
+mkdir -p ~/mnt/dataset
+swarmfs mount bzz://<reference> ~/mnt/dataset
+```
+
+That blocks until you unmount (`fusermount -u ~/mnt/dataset` from another
+shell, or Ctrl-C). Meanwhile:
+
+```bash
+ls -la ~/mnt/dataset/data
+duckdb -c "select count(*) from '~/mnt/dataset/data/*.parquet'"
+rsync -a ~/mnt/dataset/ ./local-copy/
+```
+
+Things worth knowing:
+
+- **It is read-only**, by design. A `bzz://` reference cannot change, so
+  there is nothing to write *to*; a `bzzf://<owner>/<topic>` mount is a
+  live, read-only view of the feed that picks up new publications (the
+  feed is re-resolved every `--feed-ttl` seconds, 15 by default). Write
+  attempts fail with "Read-only file system". Writing goes through Python
+  (`fs.upload`, `pipe_file`, transactions), where the new reference is
+  something you can hold.
+- **Mount a sub-directory** by putting it in the URL:
+  `swarmfs mount <ref>/data ~/mnt/data`. A bare 64-hex (or 128-hex,
+  encrypted) reference is accepted as shorthand for `bzz://<ref>`.
+- **Local disk caching** is the same fsspec URL chaining as everywhere
+  else: `swarmfs mount 'simplecache::bzz://<ref>' ~/mnt/x -o
+  simplecache-cache_storage=/var/tmp/swarm-cache`.
+- **Node options** mirror the storage options: `--api-url`,
+  `--allow-gateway` (chunk verification turns on automatically, as it does
+  in Python), `--verify`/`--no-verify`, `--timeout`, and `-o key=value` for
+  anything else.
+- **Setup problems fail in the terminal, not in the mount**: a bad
+  reference, an unreachable node, a refused gateway, or a missing
+  mountpoint each produce one line and exit code 1 — you never get a
+  directory where every command says "Input/output error".
+- From Python: `swarmfs.fuse.mount(url, mountpoint)` does the same
+  (`foreground=False` runs it on a thread and returns it).
+
 ## Knowing a reference before you upload
 
 Swarm addresses are computable: the reference *is* a hash of the content's
@@ -541,6 +590,13 @@ gateway and refused unless you pass `allow_gateway=True`. On that path,
 every chunk you read is verified client-side against its content hash, so
 even an untrusted gateway can't hand you tampered data — but running your
 own light node avoids the question entirely.
+
+**`swarmfs mount` says fusepy or libfuse is missing** — the Python side
+is the `fuse` extra (`pip install "swarmfs[fuse]"`); the C library is a
+system package, and it has to be libfuse **2** (fusepy does not load
+libfuse3): `apt install libfuse2` — `libfuse2t64` on Ubuntu 24.04 and
+later — or macFUSE on macOS. `/dev/fuse` also has to exist and be
+accessible, which it is not in many containers.
 
 **Everything hangs or the wrong data comes back** — check `fs.trusted` and
 `fs.verify_active` on your filesystem instance; if you expected verification

@@ -77,22 +77,57 @@ trip. Notes from the live run: the old postage batch filled up and the fail-earl
 `POST /stamps` takes `Immutable` as a *header*, not a query param, so it came out
 immutable — fine at this depth).
 
-## Standalone FUSE mount — not built (noted 2026-09-11)
+## Standalone FUSE mount (noted 2026-09-11, built the same day)
 
 ontodag-fs's roadmap has asked for this since its Step 0, and it was never
 built here, which nobody noticed because ontodag-fs mounts through its own CLI
 instead. It is fsspec's generic FUSE wrapper over the existing backend, not new
-code:
+code — `swarmfs/fuse.py` subclasses `fsspec.fuse.FUSEr` and adds policy:
 
-- [ ] Verify `fsspec.fuse.run(SwarmFileSystem(...), "bzz-root-or-ref/", mountpoint)`
-      works read-only against the memory backend and a Bee gateway; fix any
-      AbstractFileSystem conformance gaps it exposes.
-- [ ] Add a `swarmfs mount <ref-or-bzz-url> <mountpoint>` console entry point —
-      this package currently declares **no** console scripts at all — plus a
-      README section, with the fusepy/libfuse caveat and a note that it is
-      read-only for immutable references.
-- [ ] Optional: a `pytest -m fuse` integration test, skipped when libfuse is
-      absent.
+- [x] Verified read-only against the offline fake node (the conftest
+      manifest, mounted through the kernel: listing, whole/ranged reads,
+      attributes, errno) **and live**: a fresh upload mounted from the local
+      Bee 2.8.2 node and, as a sub-directory, through
+      `api.gateway.ethswarm.org` with `--allow-gateway` (verification
+      auto-on; `ls` + an 8 KiB `cmp` in 1.1 s). A `bzzf://` mount is a live
+      view: the offline test publishes an update and reads it back through
+      the mount after `feed_ttl`.
+      *Conformance gaps found and fixed:* (1) the gateway's front proxy
+      answers `/health` with `text/plain` `OK`, and `SwarmClient.health()`
+      demanded JSON — first contact died with an aiohttp `ContentTypeError`
+      that is not even in the exception taxonomy; a 2xx is now healthy
+      whatever the body. (2) fsspec's `FUSEr` is not usable as-is: it lets
+      every exception but `FileNotFoundError` escape (fusepy then reports
+      EINVAL — and `SwarmError` has `errno=None`, which fusepy's handler
+      cannot even compare), reports `time.time()` on every `getattr`, mode
+      `0777`, uid 1000, and its write path calls `seek()` on a write-mode
+      `AbstractBufferedFile`, which raises — it only ever worked for
+      BytesIO-backed memory files. Hence the subclass: guarded operations,
+      constant mount-time stamps, `0444`/`0555`, the real uid/gid, and
+      every mutating op refused with EROFS on top of the kernel `ro` flag.
+      `kernel_cache` is passed for `bzz://` (content at a path never
+      changes) and withheld for `bzzf://`.
+- [x] `swarmfs mount <url> <mountpoint>` — the package's first and only
+      console script (`swarmfs.cli`, also `python -m swarmfs`); a bare
+      64/128-hex reference is accepted as `bzz://<ref>`, chains like
+      `simplecache::bzz://…` work, `--api-url/--allow-gateway/--verify/
+      --timeout/--feed-ttl/-o` mirror the storage options. Setup errors
+      (bad URL, missing mountpoint, unreachable node, refused gateway,
+      missing path) are one line and exit 1 *before* anything is mounted.
+      README section + User Guide section with the fusepy/libfuse-2 caveat
+      and the read-only note; `fuse` extra (`fusepy`) added.
+- [x] `pytest -m fuse`: three kernel-mount tests (bzz root, bzz
+      sub-directory, bzzf live view) over the fake node, skipping — naming
+      the missing piece — without fusepy, libfuse 2, `/dev/fuse` or
+      `fusermount`; CI installs libfuse2 so they run there. Seven more
+      tests cover URL normalisation, chain unwrapping, pre-flight checks
+      and the CLI without FUSE.
+- [ ] Follow-up, deliberately not done: a writable mount (`--rw`: each
+      `release` a commit; `bzzf://` would publish, `bzz://` would need to
+      report the new root at unmount). The fs already supports it
+      semantically (read-your-writes through the root map), but fsspec's
+      FUSEr write path has to be replaced, not reused, and `mkdir`
+      needs phantom directories (Mantaray has no empty ones).
 
 ## v2 — `bzzf://` feed-mounted mutability
 

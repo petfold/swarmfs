@@ -17,6 +17,11 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+      # libfuse 2 for the `fuse`-marked tests (tests/test_fuse.py mounts the
+      # fake-node filesystem through the kernel). The package is libfuse2t64
+      # on Ubuntu 24.04 runners and libfuse2 before that; without either the
+      # mount tests skip — which is why this is installed, not left to luck.
+      - run: sudo apt-get update && (sudo apt-get install -y libfuse2t64 || sudo apt-get install -y libfuse2)
       - run: pip install -e ".[test]"
       # SWARMFS_TEST_BEE is unset, so tests/test_integration.py's
       # live-node tests skip themselves — this runs the offline suite only.

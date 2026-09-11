@@ -32,6 +32,7 @@ Package version this file describes: `0.9.0`.
 |---|---|
 | `pip install swarmfs` | `bzz://`, local-first, chunk verification, offline BMT addressing, encryption — runtime deps: `fsspec`, `aiohttp`, `eth-hash[pycryptodome]` (keccak moved into base in 0.9; before that a plain install crashed on first verified/gateway read) |
 | `pip install "swarmfs[feeds]"` | feed **signing** (`bzzf://` writes) and signature *verification* — the two things needing `eth-keys`; reading feeds works from the base install |
+| `pip install "swarmfs[fuse]"` | the `swarmfs mount` command / `swarmfs.fuse` (fusepy); also needs a system libfuse **2** (`libfuse2`/`libfuse2t64`, macFUSE) |
 
 ## 3. Exports
 
@@ -199,3 +200,25 @@ surface: swarmlite builds its snapshot history and publish path on it
 | `FileNotFoundError` | path/reference not found (fsspec semantics). |
 | `PermissionError` | endpoint looks like a gateway and `allow_gateway` is False. |
 | `ConnectionError` | node unreachable at first contact (except in local-first mode, where offline is normal). |
+
+## 11. FUSE mount (`swarmfs.fuse`, `swarmfs mount`)
+
+fsspec's generic FUSE wrapper (`fsspec.fuse.FUSEr`, on fusepy) over the
+backend, made **read-only** (kernel `ro` flag plus EROFS from every mutating
+operation), with `0444`/`0555` modes, the mount time as the constant
+timestamp, errno mapping for every operation (not-found → ENOENT, node or
+network trouble → EIO, logged), and `kernel_cache` for `bzz://` mounts
+only (content at a fixed reference never changes; a feed's does). The
+reference is resolved *before* mounting, so setup errors raise normally
+instead of producing an EIO directory. Needs the `fuse` extra and libfuse 2.
+
+| name | signature | semantics |
+|---|---|---|
+| `fuse.mount` | `(url, mountpoint, *, foreground=True, threads=False, ready_file=False, allow_other=False, fs=None, **storage_options)` | mount `url` (`bzz://`, `bzzf://`, bare 64/128-hex ref, or an fsspec chain such as `simplecache::bzz://…`) at an existing directory. Blocks until unmounted; `foreground=False` runs the FUSE loop on a daemon thread and returns it. `storage_options` go to `url_to_fs` (keyed by protocol for chains). Raises `ValueError` (not a Swarm URL), `FileNotFoundError`/`NotADirectoryError` (mountpoint or path), `ImportError`/`OSError` (fusepy/libfuse missing). |
+| `fuse.normalize_url` | `(url)` | bare 64/128-hex reference (with optional `/subpath`) → `bzz://<ref>…`; anything else unchanged. |
+| `fuse.swarm_filesystem_of` | `(fs)` | the `SwarmFileSystem` inside a (possibly caching-wrapped) fsspec instance; `ValueError` if none. |
+| `cli.main` | `(argv=None)` | the `swarmfs` console script (`python -m swarmfs`): subcommand `mount <url> <mountpoint>` with `--api-url`, `--allow-gateway`, `--verify`/`--no-verify`, `--timeout`, `--feed-ttl`, `-o KEY=VALUE`, `--threads`, `--allow-other`, `--debug`. Exit 0 on unmount, 1 with a one-line message on a setup error, 2 for usage. |
+
+Command shape: `swarmfs mount bzz://<ref>[/path] <dir>`; unmount with
+`fusermount -u <dir>` or Ctrl-C. The `swarmfs` script has this one
+subcommand by decision — stamps, uploads and feeds are swarm-cli's job.

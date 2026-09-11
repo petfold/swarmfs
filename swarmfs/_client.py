@@ -4,6 +4,7 @@ plus its blocking twin for code that doesn't use asyncio."""
 from __future__ import annotations
 
 import functools
+import json
 import os
 import weakref
 
@@ -438,11 +439,20 @@ class SwarmClient:
             return (await resp.json())["reference"]
 
     async def health(self) -> dict:
+        """``GET /health``. Bee answers JSON (``status``, ``version``,
+        ``apiVersion``); the proxy in front of a public gateway may answer
+        a plain-text ``OK`` instead (api.gateway.ethswarm.org does). A 2xx
+        is healthy either way, so a non-JSON body comes back as
+        ``{"status": <text>}`` rather than as an aiohttp decode error."""
         url = f"{self.api_url}/health"
         session = await self._get_session()
         async with session.get(url) as resp:
             await self._raise_for_status(resp, url)
-            return await resp.json()
+            body = await resp.read()
+            try:
+                return json.loads(body)
+            except ValueError:
+                return {"status": body.decode("utf-8", "replace").strip() or "ok"}
 
 
 # ------------------------------------------------------------- sync facade

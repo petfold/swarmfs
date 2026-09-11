@@ -10,6 +10,24 @@ original wording). Entries for versions whose notes were never written are
 summarised from their release commits, so they say what shipped without
 claiming more detail than the history holds.
 
+## [Unreleased]
+
+### Added
+
+- **Standalone FUSE mount** — `swarmfs mount <url> <mountpoint>` (the
+  package's first console script; also `python -m swarmfs`) and
+  `swarmfs.fuse.mount()`: a `bzz://` reference, a sub-directory of one, or a
+  `bzzf://` feed (a live, read-only view) as a local directory, via fsspec's
+  FUSE wrapper. Read-only by design; `simplecache::` chaining works; needs
+  the new `fuse` extra (fusepy) and a system libfuse 2. Verified against
+  the offline fake node, a local Bee 2.8.2 and the public gateway.
+
+### Fixed
+
+- `SwarmClient.health()` accepted only a JSON body; the proxy in front of
+  `api.gateway.ethswarm.org` answers plain-text `OK`, so first contact with
+  that gateway failed with an aiohttp decode error. Any 2xx is healthy now.
+
 ## [0.9.0] — 2026-08-04
 
 ### Added

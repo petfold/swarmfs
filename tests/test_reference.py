@@ -60,12 +60,13 @@ API_SECTIONS = [
     "7. Local-first store (`swarmfs.localstore`)",
     "8. Sync worker (`swarmfs.localsync`)",
     "9. Feeds (`swarmfs.feeds`)",
+    "11. FUSE mount (`swarmfs.fuse`, `swarmfs mount`)",
 ]
 
 
 def _resolve(dotted: str):
     parts = dotted.split(".")
-    if parts[0] in ("localstore", "localsync", "stamps", "feeds"):
+    if parts[0] in ("localstore", "localsync", "stamps", "feeds", "fuse", "cli"):
         obj = importlib.import_module(f"swarmfs.{parts[0]}")
         parts = parts[1:]
     else:
