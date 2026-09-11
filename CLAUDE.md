@@ -58,7 +58,7 @@ chunk. This is the single biggest piece of real engineering in the project.
   (and mutation) endpoint ships, the design becomes significantly more efficient — listing
   collapses from O(trie nodes) round trips to O(pages), and the client-side Mantaray walk
   becomes a fallback rather than the primary path. Check the issue's status at the start of
-  planning any listing/write work, and update this file and `docs/roadmap.md` accordingly.
+  planning any listing/write work, and update this file and `ROADMAP.md` accordingly.
 - **Design for a dual read path with capability detection.** Probe for the server-side
   endpoint (via Bee version from `/health`, or by trying it once and caching the result per
   filesystem instance). If present, use it. If absent, fall back to client-side trie walking.
@@ -407,7 +407,7 @@ gateway selection/fallback (see next section).
 
 ## Phase plan
 
-See `docs/roadmap.md`. Short version:
+See `ROADMAP.md`. Short version:
 - **v0** read-only `bzz://`: client + Mantaray parse + range reads. Enough for pandas/dask.
 - **v1** stamps + immutable writes via the transactional commit engine.
 - **v2** `bzzf://` feed-mounted mutability.
@@ -424,7 +424,7 @@ See `docs/roadmap.md`. Short version:
 
 ## Working agreements for Claude Code
 
-- Update this file and `docs/roadmap.md` when a decision changes. They outlive any chat.
+- Update this file and `ROADMAP.md` when a decision changes. They outlive any chat.
 - Tests first for the Mantaray codec — it's the load-bearing, bug-prone part. Build against
   known fixtures (upload a small collection to a real Bee node, capture the reference, assert
   the codec's parse matches). Don't mock away the trie format; that's where the bugs hide.

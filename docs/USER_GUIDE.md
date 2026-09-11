@@ -558,7 +558,7 @@ boundary. Use threads, not processes, for parallelism against swarmfs.
 - [README.md](../README.md) — the quick reference: installation, the
   upload/download one-liners, the three API tiers (fsspec / `SwarmClient` /
   raw HTTP), and how the Mantaray manifest trie works under the hood.
-- [roadmap.md](roadmap.md) — what's implemented, what's planned, and the
+- [../ROADMAP.md](../ROADMAP.md) — what's implemented, what's planned, and the
   status of Bee's upstream server-side listing feature request
   ([ethersphere/bee#5535](https://github.com/ethersphere/bee/issues/5535)),
   which will make listing large collections significantly faster once it

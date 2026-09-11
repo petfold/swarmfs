@@ -185,7 +185,7 @@ feed before consulting the listing cache.
 Goal: one shared layer that makes memory, local disk, and Swarm cooperate
 instead of competing — local-first, not caching. Full design (invariant,
 durability ladder, on-disk format, eviction, phases L0–L4):
-**[`docs/localstore-design.md`](localstore-design.md)**. Design agreed with
+**[`docs/localstore-design.md`](docs/localstore-design.md)**. Design agreed with
 recordstore as the second consumer (its ROADMAP has the matching track);
 grew out of recordstore's "should values get a cache too?" question.
 

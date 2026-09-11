@@ -16,7 +16,7 @@ writes (postage stamps, every commit a snapshot), mutable feed-backed
 `bzzf://` mounts, and a **local-first mode**: commits land on local disk
 instantly and sync to Swarm in the background — offline is the normal
 mode, `fs.sync()` is the certainty barrier. See the
-[roadmap](docs/roadmap.md) and the local-first design in
+[roadmap](ROADMAP.md) and the local-first design in
 [docs/localstore-design.md](docs/localstore-design.md).
 
 New to swarmfs? This README is the quick tour — the
