@@ -10,6 +10,17 @@ original wording). Entries for versions whose notes were never written are
 summarised from their release commits, so they say what shipped without
 claiming more detail than the history holds.
 
+## [0.11.1] — 2026-09-11
+
+### Fixed
+
+- Writable mount: a freshly created file is dirty only once bytes are written.
+  The shell's `> file` closes a duplicated descriptor before writing, the
+  kernel flushes on that close too, and the mounter committed an empty file
+  followed by the real content — on a content-addressed object store
+  (ontodag-fs) that left a stale empty object with the same label. Now one
+  commit, of the content; an untouched new file is committed once at release.
+
 ## [0.11.0] — 2026-09-11
 
 ### Added

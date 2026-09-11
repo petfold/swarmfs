@@ -270,7 +270,11 @@ Decisions:
   asynchronously after `close(2)` returns, so a commit there is invisible
   to the closing process and its errors are lost; `flush` is synchronous
   with close and its error is close's return. A refused commit keeps the
-  buffer pending for retry. In-flight files and `mkdir`'d (phantom)
+  buffer pending for retry. A *created* file is not dirty until written
+  (0.11.1): the shell's `> file` is open, dup2, close(fd), write, close(1),
+  and the kernel flushes on both closes — committing on the first produced
+  an empty object and then the real one (measured live on ontodag-fs: two
+  objects, one label). In-flight files and `mkdir`'d (phantom)
   directories are answered from the mounter's tables until content lands
   (Mantaray has neither half-written files nor empty directories).
   Directory rename = per-file `cp_file`+`rm_file` in one transaction
@@ -476,7 +480,8 @@ gateway selection/fallback (see next section).
 
 ## Packaging & CI (decided, implemented)
 
-- **Version**: `0.11.0` (2026-09-11: the writable FUSE mount — `--rw`, commit on
+- **Version**: `0.11.1` (2026-09-11: created files dirty only once written — the
+  shell-redirect double-commit). `0.11.0` (2026-09-11: the writable FUSE mount — `--rw`, commit on
   close, phantom directories, stamp pre-flight; live-verified from the shell).
   `0.10.1` (2026-09-11: `mount(fs=)` accepts any fsspec filesystem so
   ontodag-fs can reuse the read-only FUSE policy; `fsname=`). `0.10.0` (2026-09-11: the standalone read-only FUSE mount —

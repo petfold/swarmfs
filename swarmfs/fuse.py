@@ -279,7 +279,8 @@ def _ops_class():
         def __init__(self, fs, path, ready_file=False):
             super().__init__(fs, path, ready_file=ready_file)
             self._pending: dict[str, tempfile.SpooledTemporaryFile] = {}  # full path -> buffer
-            self._dirty: set[str] = set()
+            self._dirty: set[str] = set()      # bytes written since the last commit
+            self._created: set[str] = set()    # created, never written: an empty file
             self._handles: dict[int, str] = {}  # fh -> full path of a pending buffer
             self._dirs: set[str] = set()  # mkdir'd, still empty (phantom) directories
 
@@ -321,8 +322,9 @@ def _ops_class():
 
         def _commit(self, full: str) -> None:
             buf = self._pending.pop(full)
-            dirty = full in self._dirty
+            dirty = full in self._dirty or full in self._created
             self._dirty.discard(full)
+            self._created.discard(full)
             try:
                 if not dirty:
                     return
@@ -394,7 +396,13 @@ def _ops_class():
             if old is not None:
                 old.close()
             self._pending[full] = buf
-            self._dirty.add(full)  # even an untouched new file is a (empty) write
+            # NOT dirty yet. The shell's `> file` does open, dup2, close(fd),
+            # write, close(1) — and the kernel calls flush on *both* closes.
+            # Marking a created file dirty committed an empty file on the
+            # first flush and the real content as a second commit (measured
+            # live: two objects with one label on ontodag-fs). An untouched
+            # new file is committed, empty, at release instead.
+            self._created.add(full)
             return self._new_handle(full)
 
         @guarded
@@ -458,6 +466,7 @@ def _ops_class():
             # returns — which is what a shell user assumes.
             full = self._handles.get(fh)
             if full is not None and full in self._dirty:
+                self._created.discard(full)
                 self._commit(full)
             return 0
 
@@ -480,6 +489,7 @@ def _ops_class():
             if full in self._pending:
                 self._pending.pop(full).close()
                 self._dirty.discard(full)
+                self._created.discard(full)
                 self._handles = {h: p for h, p in self._handles.items() if p != full}
                 try:
                     self.fs.info(full)
@@ -493,9 +503,10 @@ def _ops_class():
             src, dst = self._full(old), self._full(new)
             if src in self._pending:  # in flight: just rebind the buffer
                 self._pending[dst] = self._pending.pop(src)
-                if src in self._dirty:
-                    self._dirty.discard(src)
-                    self._dirty.add(dst)
+                for table in (self._dirty, self._created):
+                    if src in table:
+                        table.discard(src)
+                        table.add(dst)
                 self._handles = {h: (dst if p == src else p) for h, p in self._handles.items()}
                 return 0
             if src in self._dirs:

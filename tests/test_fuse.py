@@ -395,6 +395,20 @@ def test_rw_mount_commits_on_release(fs, tmp_path):
         # truncate an existing file in place
         os.truncate(mp / "copy.html", 4)
         assert (mp / "copy.html").read_bytes() == b"<h1>"
+
+        # the shell's `> file`: open, dup2, close(fd), write, close(1) — the
+        # kernel flushes on both closes; that must be ONE commit, of the
+        # content (measured live: it used to commit an empty file first)
+        n = len(fs.commit_log)
+        subprocess.run(f"echo 'from a shell' > '{mp / 'shell.txt'}'", shell=True, check=True)
+        assert (mp / "shell.txt").read_bytes() == b"from a shell\n"
+        assert len(fs.commit_log) == n + 1
+        # an untouched new file is still a (single, empty) commit at release
+        subprocess.run(f"touch '{mp / 'empty.txt'}'", shell=True, check=True)
+        deadline = time.monotonic() + 5
+        while len(fs.commit_log) < n + 2 and time.monotonic() < deadline:
+            time.sleep(0.05)  # release is asynchronous
+        assert len(fs.commit_log) == n + 2 and (mp / "empty.txt").read_bytes() == b""
     finally:
         _unmount(str(mp))
         th.join(timeout=10)
