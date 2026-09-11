@@ -278,6 +278,17 @@ Decisions:
 - **Requires libfuse 2** via fusepy (`fuse` extra) — the caveat is in the
   README and User Guide; the module imports cleanly without it so the CLI
   can still explain what to install.
+- **Reusable by other backends** (0.10.1): `mount(fs=<any fsspec fs>)`
+  applies the same policy to a foreign filesystem — ontodag-fs's
+  `odag-fs mount` goes through it, which replaced fsspec's raw wrapper
+  there after a live comparison showed the raw one reporting `0777`, a
+  timestamp that changes between two `stat`s, and "Invalid argument" plus
+  a traceback for every refused write. `kernel_cache` only for plain
+  `bzz://`. A pitfall found on the way: `fsspec.fuse.run(foreground=False)`
+  passes ``foreground=False`` to fusepy, and libfuse then **forks and
+  `_exit`s the parent** — the calling process dies silently with status 0.
+  `swarmfs.fuse.mount` always keeps fusepy in the foreground and threads
+  itself.
 - **Live fact (2026-09-11)**: `api.gateway.ethswarm.org/health` returns
   `text/plain` `OK` from its Express proxy, not Bee's JSON; `health()` now
   treats any 2xx as healthy. Found by the roadmap's gateway check.
@@ -452,7 +463,8 @@ gateway selection/fallback (see next section).
 
 ## Packaging & CI (decided, implemented)
 
-- **Version**: `0.10.0` (2026-09-11: the standalone read-only FUSE mount —
+- **Version**: `0.10.1` (2026-09-11: `mount(fs=)` accepts any fsspec filesystem so
+  ontodag-fs can reuse the read-only FUSE policy; `fsname=`). `0.10.0` (2026-09-11: the standalone read-only FUSE mount —
   `swarmfs mount`, the package's first console script — and ACT-protected
   content, both live-validated against Bee 2.8.2; plus the gateway `/health`
   plain-text fix. `0.9.0` was encrypted storage and recall — files AND directories, feeds over 128-hex roots, all live-validated; keccak moved into base deps and [feeds] became signing-only; feeds reference section; bytes_size over encrypted refs via ranged GET. `0.8.0` was public raw-reference reads: `fs.read_reference`/`fs.reference_size`, grown for ontodag-fs which was reaching into the private `_read_reference`; `0.7.1` was docs: the test-pinned REFERENCE.md + v3 README/User Guide catch-up; `0.7.0` was L3+L4: the fs's own write path goes local-first —

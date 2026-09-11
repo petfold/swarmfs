@@ -230,6 +230,43 @@ def test_mount_root_can_be_a_subdirectory(fs, tmp_path):
 
 
 @pytest.mark.fuse
+def test_any_fsspec_filesystem_mounts_through_fs(tmp_path):
+    """``fs=`` accepts a foreign fsspec filesystem: same read-only policy,
+    attributes and errno mapping (ontodag-fs mounts its view this way)."""
+    reason = _fuse_unavailable()
+    if reason:
+        pytest.skip(reason)
+    import fsspec
+
+    from swarmfs.fuse import mount
+
+    mem = fsspec.filesystem("memory")
+    mem.pipe_file("/mounted/a.txt", b"alpha")
+    mem.pipe_file("/mounted/sub/b.txt", b"beta")
+    mp = tmp_path / "mnt"
+    mp.mkdir()
+    th = mount("memory:///mounted", str(mp), fs=mem, fsname="memory-view",
+               foreground=False, ready_file=True)
+    try:
+        deadline = time.monotonic() + 15
+        while not os.path.exists(mp / ".fuse_ready"):
+            assert th.is_alive(), "FUSE thread died"
+            assert time.monotonic() < deadline, "mount not ready"
+            time.sleep(0.05)
+        assert sorted(os.listdir(mp)) == ["a.txt", "sub"]
+        assert (mp / "sub/b.txt").read_bytes() == b"beta"
+        assert stat.S_IMODE(os.stat(mp / "a.txt").st_mode) == 0o444
+        with pytest.raises(OSError) as e:
+            open(mp / "new.txt", "wb")
+        assert e.value.errno in (errno.EROFS, errno.EACCES, errno.EPERM)
+        with pytest.raises(FileNotFoundError):
+            os.stat(mp / "nope")
+    finally:
+        _unmount(str(mp))
+        th.join(timeout=10)
+
+
+@pytest.mark.fuse
 def test_bzzf_mount_is_a_live_view_of_the_feed(manifest, tmp_path):
     """A feed mount stays in feed coordinates and follows updates: the
     reader instance re-resolves the feed after ``feed_ttl``, and the mount

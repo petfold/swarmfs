@@ -259,6 +259,7 @@ def mount(
     ready_file: bool = False,
     allow_other: bool = False,
     fs=None,
+    fsname: str | None = None,
     **storage_options,
 ):
     """Mount ``url`` at ``mountpoint``, read-only.
@@ -286,9 +287,16 @@ def mount(
         Let users other than the mounting one access the mount (needs
         ``user_allow_other`` in ``/etc/fuse.conf``).
     fs:
-        A pre-built filesystem to mount instead of resolving ``url``
-        (tests inject a fake-node instance); ``url`` then only supplies
-        the path.
+        A pre-built filesystem to mount instead of resolving ``url``;
+        ``url`` then only supplies the path inside it. **Any** fsspec
+        filesystem is accepted here, not only Swarm ones — this is how
+        ontodag-fs mounts its lattice view with the same read-only
+        policy, errno mapping and attributes (its own writes are refused
+        with EROFS instead of fsspec's bare EINVAL). ``kernel_cache`` is
+        only enabled when a plain ``bzz://`` filesystem is found inside.
+    fsname:
+        What ``mount``/``df`` show as the source (default: ``url`` when it
+        has no commas or spaces).
     **storage_options:
         Passed to ``url_to_fs`` — ``api_url``, ``allow_gateway``,
         ``verify``, ``feed_ttl``… For a chained URL, key them by protocol
@@ -307,9 +315,13 @@ def mount(
     url = normalize_url(url)
     if fs is None:
         fs, path = url_to_fs(url, **storage_options)
+        inner = swarm_filesystem_of(fs)
     else:
-        path = fs._strip_protocol(url)
-    inner = swarm_filesystem_of(fs)
+        path = fs._strip_protocol(url) or getattr(fs, "root_marker", "")
+        try:
+            inner = swarm_filesystem_of(fs)
+        except ValueError:
+            inner = None  # a foreign fsspec filesystem: same policy, no kernel_cache
 
     if not os.path.isdir(mountpoint):
         if os.path.exists(mountpoint):
@@ -331,11 +343,13 @@ def mount(
     ops = ops_cls(fs, path, ready_file=ready_file)
 
     options: dict = {"ro": True, "subtype": "swarmfs"}
-    if not re.search(r"[,\s]", url):
-        options["fsname"] = url  # what `mount` and `df` display as the source
-    if not isinstance(inner, SwarmFeedFileSystem):
+    name = fsname if fsname is not None else url
+    if name and not re.search(r"[,\s]", name):
+        options["fsname"] = name  # what `mount` and `df` display as the source
+    if inner is not None and not isinstance(inner, SwarmFeedFileSystem):
         # content at a fixed bzz:// path can never change: cached pages are
-        # correct forever. A feed's content moves, so no kernel_cache there.
+        # correct forever. A feed's content moves, so no kernel_cache there;
+        # nor for a foreign filesystem, whose paths may change meaning.
         options["kernel_cache"] = True
     if allow_other:
         options["allow_other"] = True

@@ -10,6 +10,16 @@ original wording). Entries for versions whose notes were never written are
 summarised from their release commits, so they say what shipped without
 claiming more detail than the history holds.
 
+## [0.10.1] — 2026-09-11
+
+### Changed
+
+- `swarmfs.fuse.mount(fs=...)` accepts **any** fsspec filesystem, not only a
+  Swarm one: the read-only policy, attributes and errno mapping are reusable
+  by other backends (ontodag-fs mounts its lattice view through it). New
+  `fsname=` parameter for the displayed mount source. `kernel_cache` is
+  enabled only when a plain `bzz://` filesystem is inside.
+
 ## [0.10.0] — 2026-09-11
 
 ### Added
