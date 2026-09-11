@@ -40,7 +40,10 @@ jobs:
           python-version: "3.12"
       - run: pip install -e . pytest "eth-keys>=0.4"
           "eth-hash[pycryptodome]>=0.5" "fsspec==2024.2.0"
-      - run: pytest
+      # A deliberately minimal environment — no [test] extra — so it collects
+      # fewer tests than the matrix above. The README count guard describes the
+      # canonical run, so it is deselected here rather than made conditional.
+      - run: pytest --deselect tests/test_reference.py::test_readme_states_the_current_test_count
 
   package:
     runs-on: ubuntu-latest
