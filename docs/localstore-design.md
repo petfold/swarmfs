@@ -398,6 +398,23 @@ each with its knob:
   could over-claim after a crash, so opening a store in (or after) `"os"`
   mode heals by checking that unconfirmed roots' blobs exist and demoting
   loudly when they don't.
+
+  **Measured 2026-09-11, so the cost is on record rather than estimated.**
+  Through `RecordStore`, a commit at the default `durability="commit"` costs
+  **~2.8 ms and ~2.2-2.9 fsyncs per put**, and it is **linear** in node count:
+  75/150/300/600/1200/2400 puts all land at 2.8-3.5 ms per put, with fsyncs
+  per put *falling* as directory fsyncs amortise across reused shard
+  directories. So 300 small nodes take about a second, against ~0.1 s for
+  `DirBytesStore`, which never fsyncs — the ~10x is exactly the durability
+  being bought, not a defect, and it does not degrade at scale.
+
+  One consequence worth knowing: `durability="blob"` is **not observable**
+  through `RecordStore`, because mutations are staged in memory and every blob
+  is written inside `commit()` — both policies therefore fsync in the same
+  place and measure the same from there (1.299 s vs 1.099 s for 300 nodes).
+  recordstore's `tests/test_local_first.py` carries this note too, after a
+  latency bound written on the assumption that they differed turned out to be
+  a coin flip.
 - **Push bandwidth.** The worker shares the link with foreground
   re-fetches; its concurrency/rate is a knob, and confirmation sampling is
   already one (see *Verification and trust*).

@@ -1,0 +1,5 @@
+=== re-publishing computing at 03:22:54
+note: committed locally; not yet confirmed on Swarm (sync did not complete within 60s). It will sync on the next use of this store.
+=== re-publishing geography at 03:24:43
+note: committed locally; not yet confirmed on Swarm (sync did not complete within 60s (last sync error: RuntimeError('node reports b841d69ec44a925c… not yet retrievable from the network; retrying root f8de5391… later'))). It will sync on the next use of this store.
+=== DONE

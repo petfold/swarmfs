@@ -1,0 +1,36 @@
+scratch home: /tmp/tmp.s8occnX1LQ
+=== publishing core
+note: committed locally; not yet confirmed on Swarm (sync did not complete within 60s). It will sync on the next use of this store.
+  exit=0
+=== publishing physics
+note: committed locally; not yet confirmed on Swarm (sync did not complete within 60s). It will sync on the next use of this store.
+  exit=0
+=== publishing mathematics
+note: committed locally; not yet confirmed on Swarm (sync did not complete within 60s (last sync error: RuntimeError('node reports 233488fc03a0559d… not yet retrievable from the network; retrying root 3339ed87… later'))). It will sync on the next use of this store.
+  exit=0
+=== publishing chemistry
+note: committed locally; not yet confirmed on Swarm (sync did not complete within 60s). It will sync on the next use of this store.
+  exit=0
+=== publishing biology
+note: committed locally; not yet confirmed on Swarm (sync did not complete within 60s (last sync error: RuntimeError('node reports ad5beff19dcdea3b… not yet retrievable from the network; retrying root 9c3b0312… later'))). It will sync on the next use of this store.
+  exit=0
+=== publishing medicine
+note: committed locally; not yet confirmed on Swarm (sync did not complete within 60s (last sync error: RuntimeError('node reports 051f123dd8df014c… not yet retrievable from the network; retrying root 34b07722… later'))). It will sync on the next use of this store.
+  exit=0
+=== publishing ai
+note: committed locally; not yet confirmed on Swarm (sync did not complete within 60s). It will sync on the next use of this store.
+  exit=0
+=== publishing economics
+note: committed locally; not yet confirmed on Swarm (sync did not complete within 60s). It will sync on the next use of this store.
+  exit=0
+=== publishing computing
+note: committed locally; not yet confirmed on Swarm (sync did not complete within 60s). It will sync on the next use of this store.
+  exit=0
+=== publishing geography
+note: committed locally; not yet confirmed on Swarm (sync did not complete within 60s). It will sync on the next use of this store.
+  exit=0
+=== publishing space
+note: committed locally; not yet confirmed on Swarm (sync did not complete within 60s). It will sync on the next use of this store.
+  exit=0
+=== PUBLISH PHASE COMPLETE
+PUBLISHER EXITED

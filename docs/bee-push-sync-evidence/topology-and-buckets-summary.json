@@ -1,0 +1,18 @@
+{
+  "note": "topology.json (892 KB) and buckets.json (2.2 MB) were summarised rather than committed; regenerate with GET /topology and GET /stamps/<batch>/buckets",
+  "topology": {
+    "depth": 9,
+    "connected": 138,
+    "population": 3873,
+    "reachability": "Private",
+    "networkAvailability": "Available"
+  },
+  "buckets": {
+    "count": 65536,
+    "bucketDepth": 16,
+    "bucketUpperBound": 16,
+    "max_occupancy": 13,
+    "mean_occupancy": 2.67,
+    "full_buckets": 0
+  }
+}

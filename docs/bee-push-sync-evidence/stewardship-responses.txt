@@ -1,0 +1,11 @@
+# PUT /stewardship/<ref> with no batch header
+{"code":400,"message":"invalid header params","reasons":[{"field":"swarm-postage-batch-id","error":"want required:"}]}
+
+
+HTTP 400
+
+# PUT /stewardship/<ref> with swarm-postage-batch-id
+{"code":200,"message":"OK"}
+
+
+HTTP 200
