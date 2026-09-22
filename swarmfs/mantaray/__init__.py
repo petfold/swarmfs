@@ -16,7 +16,8 @@ from .node import (
     marshal,
     unmarshal,
 )
-from .walk import FileEntry, Location, NodeStore, iter_files, list_directory, locate
+from .walk import (DEFAULT_CONCURRENCY, FileEntry, Location, NodeStore,
+                   iter_files, list_directory, locate)
 
 __all__ = [
     "NT_EDGE",
@@ -34,6 +35,7 @@ __all__ = [
     "FileEntry",
     "Location",
     "NodeStore",
+    "DEFAULT_CONCURRENCY",
     "iter_files",
     "list_directory",
     "locate",

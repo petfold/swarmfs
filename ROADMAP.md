@@ -463,9 +463,23 @@ Design: `docs/distributed-writes.md`. First consumer: `brash` (Iceberg on Swarm)
       timestamps over `/chunks` instead. A pinned feed resolves once and
       never looks up again; writes raise `FeedError` even with a signer.
       Live-validated (`test_bzzf_pinned_views_live`).
-- [ ] Listing: measure the trie walk; bounded-concurrency BFS if
-      sequential; `bench_find_2000_files`. Optional `index=True` root index
-      as a third `ListingBackend` — only when a consumer asks.
+- [x] Listing: measure the trie walk; bounded-concurrency BFS if
+      sequential; `bench_find_2000_files` (2026-09-22). It *was* strictly
+      sequential (peak one fetch in flight). `NodeStore` now prefetches
+      each node's children with a bounded semaphore
+      (`DEFAULT_CONCURRENCY = 16`) while the walk stays an ordered
+      depth-first traversal — same entries, same order, **same round-trip
+      count** (2,224 for 2,000 files), verified against the old
+      implementation on three trie shapes. Measured on real nodes: a local
+      Bee goes 2.6 s → 1.6 s (1.7x — the ceiling there is this process's
+      CPU at ~1.2 ms/fetch, not waiting), a public gateway 18.0 s → 3.1 s
+      (5.9x at 158 ms/fetch). A second, structural ceiling: only one
+      node's children are warmed at a time, so the fan-out bounds
+      in-flight work (ten for a flat `part.00000…` dataset).
+      `tests/test_walk_scale.py`, benchmark behind `-m bench`.
+- [ ] Listing: optional `index=True` root index as a third
+      `ListingBackend` — only when a consumer asks. Still the only way to
+      cut the *count* of round trips before bee#5535 lands.
 - [ ] Decision: swarmfs emits bee's metadata keys only and passes
       `metadata=` through; layers namespace their own keys (§8).
 - [ ] Upstream `known_implementations` entries for `bzz`/`bzzf` (§9).

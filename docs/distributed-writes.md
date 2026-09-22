@@ -196,17 +196,39 @@ Dask's `find()` over a dataset with thousands of partitions walks the trie
 node by node. `MantarayListingBackend` already shares a reference-keyed
 `NodeStore` (content-addressed, safe across roots). Two steps, in order:
 
-1. **Measure, then parallelise.** If the walk is sequential per level, make
-   `iter_files` a bounded-concurrency BFS (reuse the commit engine's
-   semaphore pattern, `concurrency=8` default). Expect the round-trip count
-   to stay the same and the wall time to drop by the fan-out. Add a
-   benchmark test over the fake node with a 2,000-file synthetic manifest
-   so regressions are visible.
+1. **Measure, then parallelise.** ~~If the walk is sequential per level,
+   make `iter_files` a bounded-concurrency BFS~~ **done 2026-09-22**, with
+   three corrections to this paragraph.
 
-   *Checked 2026-09-22*: the walk **is** sequential — `mantaray/walk.py`
-   recurses depth-first through `_iter_fork` (and `list_directory.process`),
-   awaiting one `store.resolve` at a time, so a level's children are fetched
-   one after another. Step 1 is therefore real work, not just the benchmark.
+   *Checked first*: the walk **was** sequential — `mantaray/walk.py`
+   recursed depth-first through `_iter_fork` (and `list_directory.process`),
+   awaiting one `store.resolve` at a time (peak: one fetch in flight).
+
+   - **Not a BFS.** A BFS would have reordered the output, and `iter_files`
+     yields in canonical sorted order. Instead `NodeStore.prefetch` starts a
+     node's children together and the walk stays an ordered depth-first
+     traversal, awaiting each child when it arrives. Same entries, same
+     order, same round-trip count — verified against the old implementation
+     on three trie shapes (flat 2,000, 50×40 nested, deep).
+   - **The default is 16, not 8** — measured, not guessed.
+   - **"Wall time drops by the fan-out" is right, and the fan-out is the
+     ceiling** — but only for a latency-bound endpoint. Real numbers on a
+     2,000-file dataset (2,224 fetches): a local Bee goes 2.6 s → 1.6 s,
+     just **1.7x**, because there ~1.2 ms/fetch is this process's own CPU
+     (HTTP + unmarshal), which concurrency cannot parallelise; a public
+     gateway at 158 ms/fetch goes 18.0 s → 3.1 s, **5.9x**. Prefetching one
+     node's children at a time also caps in-flight work at the trie's
+     fan-out — ten for a flat `part.00000…` dataset, which branches by
+     decimal digit.
+
+   One trap found on the way: `list_directory` prunes at the first `/`, so
+   prefetching *all* of a node's forks would have fetched every
+   subdirectory node the listing only means to name. The prefetch follows
+   the pruning rule, and a test pins it.
+
+   The benchmark lives in `tests/test_walk_scale.py` behind `-m bench`
+   (deselected by default), with simulated latency so it measures the
+   overlap rather than the machine.
 2. **Optional root index** (`index=True` on commit, default off): the
    commit writes `.swarmfs/index.json` at the manifest root — every file's
    path, data reference, size and metadata — and the listing backend, if it

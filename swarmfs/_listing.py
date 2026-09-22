@@ -14,7 +14,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import AsyncIterator
 
-from .mantaray import FileEntry, NodeStore, iter_files, list_directory, locate
+from .mantaray import (DEFAULT_CONCURRENCY, FileEntry, NodeStore, iter_files,
+                       list_directory, locate)
 
 
 def _b(path: str) -> bytes:
@@ -55,9 +56,12 @@ class MantarayListingBackend(ListingBackend):
     ``reader`` is the raw client or a VerifyingReader — with the latter,
     manifest nodes are chunk-verified too, so listings are trustless."""
 
-    def __init__(self, reader, cache_size: int = 4096):
-        # keyed by reference (content-addressed), safe to share across roots
-        self.store = NodeStore(load=lambda ref: reader.bytes_get(ref.hex()), cache_size=cache_size)
+    def __init__(self, reader, cache_size: int = 4096,
+                 concurrency: int = DEFAULT_CONCURRENCY):
+        # keyed by reference (content-addressed), safe to share across roots;
+        # `concurrency` bounds how many node fetches are in flight at once
+        self.store = NodeStore(load=lambda ref: reader.bytes_get(ref.hex()),
+                               cache_size=cache_size, concurrency=concurrency)
 
     async def stat(self, root: str, path: str) -> Stat | None:
         root_ref = bytes.fromhex(root)

@@ -82,10 +82,14 @@ Repository = "https://github.com/petfold/swarmfs"
 Issues = "https://github.com/petfold/swarmfs/issues"
 
 [tool.pytest.ini_options]
-addopts = "-q"
+# `bench` is deselected by default: it sleeps to simulate network latency,
+# so it measures the walk rather than the machine — useful, but not on
+# every run. `pytest -m bench` runs it.
+addopts = "-q -m 'not bench'"
 testpaths = ["tests"]
 markers = [
     "fuse: mounts through the kernel — needs fusepy, libfuse 2, /dev/fuse (skips otherwise)",
+    "bench: timing benchmark with simulated latency — deselected by default",
 ]
 
 [tool.hatch.build.targets.sdist]

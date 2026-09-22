@@ -64,6 +64,21 @@ chunk. This is the single biggest piece of real engineering in the project.
   filesystem instance). If present, use it. If absent, fall back to client-side trie walking.
   When the endpoint eventually ships, the speedup arrives with no swarmfs release needed.
 - v0 ships on the client-side path so it works against **today's** network and public gateways.
+- **The walk is concurrent, but the round trips are irreducible** (2026-09-22).
+  `NodeStore` prefetches each node's children under a bounded semaphore
+  (`DEFAULT_CONCURRENCY = 16`) while `iter_files`/`list_directory` stay
+  ordered depth-first walks: same entries, same order, **same number of
+  fetches** — only the waiting overlaps. Measured on real nodes with a
+  2,000-file dataset (2,224 fetches): local Bee 2.6 s → 1.6 s (1.7x, because
+  there the bottleneck is this process's CPU at ~1.2 ms/fetch, not latency),
+  public gateway 18.0 s → 3.1 s (5.9x at 158 ms/fetch). Two ceilings, both
+  worth knowing: client CPU on a local node, and *fan-out* everywhere — only
+  one node's children are warmed at a time, so a flat `part.00000…` dataset
+  (branching by decimal digit) never has more than ten fetches in flight.
+  `list_directory`'s prefetch follows its pruning rule exactly, or listing a
+  directory would fetch every subdirectory node it only means to name — that
+  regression is pinned by a test. Cutting the *count* needs the root index
+  (ROADMAP) or bee#5535.
 
 ## The two hard engineering artifacts
 
