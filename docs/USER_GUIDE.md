@@ -24,6 +24,7 @@ here, that's a bug — please open an issue.
   - [dask.dataframe](#daskdataframe)
   - [dask.array (via Zarr)](#daskarray-via-zarr)
   - [dask.bag](#daskbag)
+  - [Writing a dataset from many workers](#writing-a-dataset-from-many-workers)
 - [Zarr](#zarr)
 - [xarray](#xarray)
 - [PyArrow](#pyarrow)
@@ -246,6 +247,50 @@ multiprocessing scheduler needs to do. This isn't a swarmfs limitation as
 such — it's true of any fsspec backend with real network state — but it's
 easy to trip over since multiprocessing is Dask's default scheduler in some
 configurations.
+
+### Writing a dataset from many workers
+
+The same process boundary has a second consequence, on the write side, and
+it is worth being blunt about it: **`dd.to_parquet("bzz://new/sales")` does
+not do what you want.** It runs on the workers, and a Swarm write is
+staged and committed per filesystem instance — so each worker commits its
+own manifest. You get N unrelated references, N stamp validations, and no
+way to find them, because the driver never sees them. Nothing errors; the
+result is just not one dataset.
+
+Use `swarmfs.dask` instead (`pip install "swarmfs[dask]"`), which is the
+channel dask's own writer has no room for:
+
+```python
+import swarmfs.dask as sd
+
+res = sd.to_parquet(ddf, "bzz://new/sales", storage_options={"stamp": "auto"})
+res.root        # ONE reference for the whole dataset — one commit
+res.paths       # ['part.0.parquet', 'part.1.parquet', ...]
+res.batches     # {(node, batch)} the partitions were stamped with
+
+dd.read_parquet(f"bzz://{res.root}/sales").compute()
+```
+
+Each worker writes its partition to Parquet in memory and uploads it,
+getting back a reference; those come home to the driver, which links them
+into a single manifest in one transaction. Nothing unpicklable travels —
+the worker builds its own filesystem from `storage_options` — so this one
+*does* work with `compute_kwargs={"scheduler": "processes"}` or a
+`distributed` cluster.
+
+Two things fall out of Swarm's model rather than from dask:
+
+- **Stamps are per node.** One node for the cluster and every worker uses
+  the same batch. Several nodes and each spends its own — then the dataset
+  lives only as long as the shortest-lived batch among them, which is why
+  `res.batches` reports the `(node, batch)` pairs: only the uploading
+  process could know them.
+- **A feed destination publishes once.** `sd.to_parquet(ddf,
+  f"bzzf://{owner}/sales", storage_options={..., "signer": key})` advances
+  the feed a single time, when the one commit lands. The `signer` never
+  leaves the driver — workers only upload blobs, so they are not handed the
+  feed owner's private key.
 
 ## Zarr
 

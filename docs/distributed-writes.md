@@ -102,6 +102,10 @@ driver-side protocol.
 
 ## 3. `swarmfs.dask` (helper module, optional dependency)
 
+*Implemented 2026-09-22 — one entry point, not two: `to_parquet`. The
+`to_zarr` shape is unchanged and still unbuilt, as this section says it
+should be.*
+
 Two entry points, both thin:
 
 ```python
@@ -114,15 +118,23 @@ root = sd.to_parquet(ddf, "bzzf://<owner>/ds", storage_options={..., "signer": k
 # -> feed advanced once, after the single commit
 ```
 
-Mechanics: `map_partitions` writes each partition to bytes with pyarrow and
-calls `fs.put_blob` on the worker (the worker's own `SwarmFileSystem`, built
+Mechanics (built with `to_delayed()` rather than `map_partitions` — the
+per-partition results are side-effect records, not a frame): each partition
+is written to bytes with pyarrow and `fs.put_blob` is called on the worker (the worker's own `SwarmFileSystem`, built
 from the same `storage_options`); the results `(path, reference, size)` come
 back to the driver, which does `link` for each inside one transaction and
 returns `fs.latest(...)`. `name_function`, `partition_on`, `write_index`,
 `schema`, `write_metadata_file` follow dask's own `to_parquet` signature where
-they make sense (`partition_on` produces hive-style paths; the optional
-`_metadata`/`_common_metadata` files are written on the driver as ordinary
-`pipe_file`s in the same transaction).
+they make sense (`partition_on` produces hive-style paths; `schema` and the
+rest of pyarrow's knobs pass through to each partition's `to_parquet`).
+
+**`write_metadata_file` was not built, and raises `NotImplementedError`**
+rather than being quietly ignored: a real `_metadata` footer aggregates
+every partition's Parquet metadata, and the workers do not carry theirs
+back. Writing it "on the driver as an ordinary `pipe_file`" — as this
+design assumed — would need that data to exist there first. Directory
+reads do not need it (`dd.read_parquet` lists the manifest and reads each
+footer, which the live test does), so the gap is cheap to leave open.
 
 The same shape gives `to_zarr`-style array writes for free later; do not
 build it until something needs it.
@@ -281,8 +293,12 @@ precedent entry to copy.
 2. ~~§7 `at_root`/`at` + bzzf `modified()`~~ **done 2026-09-22** —
    `tests/test_feedfs.py` (pinned/time-travelled views, refusals, mtime)
    and `test_bzzf_pinned_views_live` against Bee 2.8.2.
-3. §3 `swarmfs.dask` helper with the §4/§5 rules, and the User Guide's
-   honest paragraph about the generic path.
+3. ~~§3 `swarmfs.dask` helper with the §4/§5 rules, and the User Guide's
+   honest paragraph about the generic path~~ **done 2026-09-22** —
+   `tests/test_dask_helper.py` (incl. the §5 ordering: sync before link)
+   and `test_dask_helper_live`, which runs the partitions in real
+   processes. The guide's new "Writing a dataset from many workers" says
+   plainly that `dd.to_parquet` to a Swarm URL yields N roots.
 4. §6 step 1 (measure/parallelise); step 2 only when a consumer asks.
 5. §8 decision recorded; §9 when the version story allows.
 

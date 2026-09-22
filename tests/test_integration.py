@@ -462,6 +462,52 @@ def test_distributed_write_live(fs):
     pd.testing.assert_frame_equal(got[["id", "part"]], expected[["id", "part"]])
 
 
+@pytest.mark.skipif(not STAMP, reason="writes need SWARMFS_TEST_STAMP")
+def test_dask_helper_live():
+    """§3 against a real node, in real *processes*: swarmfs.dask writes the
+    partitions on multiprocessing workers (nothing unpicklable crosses the
+    boundary — each builds its own filesystem from storage_options) and the
+    driver turns their references into one manifest with one commit. Then
+    the same, published through a feed: the driver holds the signer, the
+    workers never see it."""
+    pd = pytest.importorskip("pandas")
+    dd = pytest.importorskip("dask.dataframe")
+    pytest.importorskip("pyarrow")
+    pytest.importorskip("eth_keys")
+    import secrets
+
+    import swarmfs.dask as sd
+    from swarmfs.feeds import FeedSigner
+
+    df = pd.DataFrame({"id": range(300), "part": [i // 100 for i in range(300)]})
+    ddf = dd.from_pandas(df, npartitions=3)
+    options = {"api_url": BEE, "stamp": STAMP}
+
+    res = sd.to_parquet(ddf, "bzz://new/dataset", storage_options=options,
+                        compute_kwargs={"scheduler": "processes"})
+
+    assert len(res) == 3 and len(res.root) == 64
+    assert res.paths == ["part.0.parquet", "part.1.parquet", "part.2.parquet"]
+    assert res.batches == {(BEE, STAMP)}  # one node, one batch
+
+    back = dd.read_parquet(f"bzz://{res.root}/dataset",
+                           storage_options={"api_url": BEE}).compute()
+    pd.testing.assert_frame_equal(
+        back.sort_values("id").reset_index(drop=True)[["id", "part"]],
+        df[["id", "part"]])
+
+    # …and onto a stable URL: one feed update for the whole dataset
+    key = secrets.token_hex(32)
+    owner = FeedSigner(key).owner_hex
+    feed_url = f"bzzf://{owner}/swarmfs-dask/dataset"
+    fed = sd.to_parquet(ddf, feed_url,
+                        storage_options={**options, "signer": key},
+                        compute_kwargs={"scheduler": "processes"})
+    assert fed.root == res.root  # same content, same reference (deterministic)
+    _poll(lambda: len(dd.read_parquet(
+        feed_url, storage_options={"api_url": BEE}).compute()), 300)
+
+
 @pytest.mark.skipif(not STAMP, reason="uploading needs SWARMFS_TEST_STAMP")
 def test_local_split_matches_bee():
     """The splitter's claim, checked against the only authority that matters:

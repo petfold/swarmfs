@@ -23,13 +23,18 @@
 # data-dir (Bee 2.8.2, public Gnosis RPC, 2026-09-22): ready ~12 minutes
 # after start, then the witnessed-confirmation test passed in 23 s with a
 # single connected peer. That warm-up is a one-time cost per data-dir —
-# keep the directory and later starts are quick.
+# keep the directory and a later start is ready in ~15 s.
+#
+# The password below is bound to the key in $DATA_DIR/keys, so this script
+# never rewrites an existing config: starting with a different password
+# fails with "configure signer: swarm key: invalid password".
 set -euo pipefail
 
 DATA_DIR="${1:-$HOME/.bee-witness}"
 API_PORT="${WITNESS_API_PORT:-1733}"
 P2P_PORT="${WITNESS_P2P_PORT:-1734}"
 RPC="${WITNESS_RPC:-https://rpc.gnosischain.com}"
+PASSWORD="${WITNESS_PASSWORD:-swarmfs-witness}"
 
 BEE="${BEE_BIN:-}"
 if [ -z "$BEE" ]; then
@@ -45,17 +50,26 @@ fi
 
 mkdir -p "$DATA_DIR"
 CONFIG="$DATA_DIR/witness.yaml"
-cat > "$CONFIG" <<EOF
+if [ -f "$CONFIG" ]; then
+  # Never rewrite an existing config: the node's key in $DATA_DIR/keys is
+  # encrypted with the password that created it, so a config with a
+  # different one fails at startup with
+  #   failed to build bee node ... configure signer: swarm key: invalid password
+  # Delete the data-dir to start over, or edit the config by hand.
+  echo "reusing the existing $CONFIG (delete the data-dir to start over)"
+else
+  cat > "$CONFIG" <<EOF
 api-addr: 127.0.0.1:$API_PORT
 p2p-addr: :$P2P_PORT
 data-dir: $DATA_DIR
-password: swarmfs-witness
+password: $PASSWORD
 full-node: false
 swap-enable: false
 mainnet: true
 storage-incentives-enable: false
 blockchain-rpc-endpoint: $RPC
 EOF
+fi
 
 cat <<EOF
 Starting a download-only witness node

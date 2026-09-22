@@ -444,10 +444,16 @@ Design: `docs/distributed-writes.md`. First consumer: `brash` (Iceberg on Swarm)
       and does not prove retrievability yet. Tests:
       `tests/test_distributed.py` (incl. the two-process shape), plus the
       local-first pair in `tests/test_localfirst_fs.py`.
-- [ ] `swarmfs.dask.to_parquet(ddf, url)` — partitions uploaded on workers,
+- [x] `swarmfs.dask.to_parquet(ddf, url)` — partitions uploaded on workers,
       one manifest on the driver, one bzzf publish. Returns root + the
       (node, batch) pairs used. Local-first workers `sync()` before
-      reporting references.
+      reporting references (2026-09-22). Workers rebuild the filesystem
+      from `storage_options`, so `scheduler="processes"` and `distributed`
+      work — live-proved in real processes; `signer` is withheld from them
+      (`DRIVER_ONLY_OPTIONS`). `partition_on` writes hive paths;
+      `write_metadata_file=True` raises `NotImplementedError` (a footer
+      across processes is not carried back). New `[dask]` extra; needed
+      `fs.resolve_stamp()` so a worker can report the batch it spent.
 - [x] bzzf `at_root=` / `at=` storage options (frozen and time-travelled
       views, read-only) and a real `modified()` for bzzf roots
       (2026-09-22). `at=` takes unix seconds, a datetime or ISO-8601

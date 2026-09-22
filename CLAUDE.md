@@ -451,9 +451,32 @@ docs/distributed-writes.md)
   several, the helper reports the (node, batch) set and renewal stays with
   the caller — swarmfs never chases foreign batches.
 - **The generic dask path (`dd.to_parquet` → `open("wb")` on workers) yields
-  N roots.** Documented, not hidden; `swarmfs.dask.to_parquet` is the
-  supported route. A `stage_only=` option to make the generic path record
-  links is a possible later addition, not a promise.
+  N roots.** Documented, not hidden (User Guide, "Writing a dataset from
+  many workers"); `swarmfs.dask.to_parquet` is the supported route. A
+  `stage_only=` option to make the generic path record links is a possible
+  later addition, not a promise.
+- **`swarmfs.dask` (implemented 2026-09-22)**: workers write their
+  partition to Parquet in memory → `put_blob`; the driver `link`s every
+  reference in one transaction → one commit, one root, one feed update.
+  Decisions made while building it:
+  - **Workers rebuild the filesystem from `storage_options`**, so nothing
+    unpicklable crosses the boundary and `scheduler="processes"` /
+    `distributed` work — the whole reason the helper exists. Live-proved
+    in real processes (`test_dask_helper_live`).
+  - **`signer` is withheld from workers** (`DRIVER_ONLY_OPTIONS`): only
+    the driver publishes the feed, so the owner's private key has no
+    business on a worker.
+  - **The driver validates the stamp before the graph runs** — one
+    fail-early check beats N workers discovering the same dead batch.
+  - **`fs.resolve_stamp()` was added for this**: a dataset's lifetime is
+    the shortest `batchTTL` among the batches that stamped its parts, and
+    only the uploading process knows which batch it spent, so the worker
+    reports `(node, batch)` back in `DatasetWrite.batches`.
+  - **`write_metadata_file=True` raises `NotImplementedError`**, loudly
+    rather than silently skipping: a real `_metadata` footer must
+    aggregate every partition's Parquet metadata across processes, which
+    nothing carries back yet. Directory reads work regardless.
+  - `to_zarr` stays unbuilt until something asks (the shape is the same).
 - **Pinned views** (implemented 2026-09-22): `bzzf` with `at_root=`/`at=`
   resolves the stable URL against a fixed root — read-only, no path
   rewriting, works for every fsspec consumer. This is how a table layer
@@ -631,10 +654,14 @@ See `ROADMAP.md`. Short version:
   `scripts/witness-node.sh` (`swap-enable: false` = ultra-light: no
   funding, no chequebook, no stamp — measured: ready ~12 min after a
   fresh start, since it first syncs postage state from the batch
-  snapshot to the chain tip, a one-time cost per data-dir; the test then
-  passed in 23 s with **one** connected peer, which is all a retrieval
-  needs). Readiness is `/topology` answering 200 — `/health` says `ok`
-  while the node is still syncing and cannot serve. A gateway is sound here because the
+  snapshot to the chain tip; a warm restart from the same data-dir is
+  ~15 s, so the directory is worth keeping — and the test passed in 23 s
+  with **one** connected peer, which is all a retrieval needs).
+  Readiness is `/topology` answering 200 — `/health` says `ok` while the
+  node is still syncing and cannot serve. The data-dir's key is
+  encrypted with the password that created it, so the script never
+  rewrites an existing config: a mismatch dies with "configure signer:
+  swarm key: invalid password". A gateway is sound here because the
   witness is untrusted by construction — it only answers `GET /bytes` and
   the caller hashes every byte against the reference, so a dishonest
   witness can only cause a false negative. A reverse **proxy** in front of

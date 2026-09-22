@@ -330,6 +330,36 @@ class FakeClient:
         pass
 
 
+class BMTFakeClient(FakeClient):
+    """FakeClient whose uploads are BMT-addressed like a real node with
+    erasure coding off — so the local-first push's ref-equality assertion
+    holds — plus the two endpoints the sync layer needs."""
+
+    async def bytes_post(self, data, stamp, tag=None, pin=False,
+                         redundancy=None, deferred=None, encrypt=False,
+                         act=False, act_history=None):
+        from swarmfs.splitter import content_address
+
+        if not isinstance(data, bytes):
+            data.seek(0)
+            data = data.read()
+        ref = content_address(data)
+        self.store[ref] = data
+        self.uploads.append((stamp, len(data)))
+        self.redundancies.append(redundancy)
+        return ref.hex()
+
+    async def stewardship_get(self, ref: str) -> bool:
+        return bytes.fromhex(ref) in self.store
+
+    async def stamps_list(self) -> list[dict]:
+        # GOOD_STAMP's TTL sits exactly at BeeRemote's one-day floor
+        return [dict(GOOD_STAMP, batchTTL=30 * 86400)]
+
+    async def stamp_get(self, batch_id: str) -> dict:
+        return dict(GOOD_STAMP, batchID=batch_id, batchTTL=30 * 86400)
+
+
 class FakeGatewayClient(FakeClient):
     """Read-only endpoint that blocks the node-owner API, like a public
     gateway: /stamps is not available, so trust detection must fail."""

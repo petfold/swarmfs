@@ -14,7 +14,7 @@ import pytest
 
 pytest.importorskip("eth_hash")
 
-from conftest import GOOD_STAMP, FakeClient  # noqa: E402
+from conftest import GOOD_STAMP, BMTFakeClient, FakeClient  # noqa: E402
 
 from swarmfs.commit import (LocalFirstCommitEngine, StagedLink,  # noqa: E402
                             StagedWrite)
@@ -24,29 +24,6 @@ from swarmfs.mantaray import unmarshal  # noqa: E402
 from swarmfs.splitter import content_address  # noqa: E402
 
 WAIT = 15
-
-
-class BMTFakeClient(FakeClient):
-    """FakeClient whose uploads are BMT-addressed like a real node with
-    erasure coding off — so the push's ref-equality assertion holds —
-    plus the two endpoints the sync layer needs."""
-
-    async def bytes_post(self, data, stamp, tag=None, pin=False,
-                         redundancy=None, deferred=None):
-        ref = content_address(data)
-        self.store[ref] = data
-        self.uploads.append((stamp, len(data)))
-        return ref.hex()
-
-    async def stewardship_get(self, ref: str) -> bool:
-        return bytes.fromhex(ref) in self.store
-
-    async def stamps_list(self) -> list:
-        # GOOD_STAMP's TTL sits exactly at BeeRemote's one-day floor
-        return [dict(GOOD_STAMP, batchTTL=30 * 86400)]
-
-    async def stamp_get(self, batch_id: str) -> dict:
-        return dict(GOOD_STAMP, batchID=batch_id, batchTTL=30 * 86400)
 
 
 class OfflineClient:

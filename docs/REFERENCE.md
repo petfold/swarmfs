@@ -81,6 +81,7 @@ Methods beyond the fsspec standard surface:
 | `SwarmFileSystem.upload` | `(lpath, rpath=None, content_type=None, encrypt=False, redundancy=None)` | one-liner: upload a file or directory, return the new reference. |
 | `SwarmFileSystem.download` | `(rpath, lpath, **kwargs)` | alias of `get`. |
 | `SwarmFileSystem.put_blob` | `(data, stamp=None)` | upload one payload → its bare **data reference**: no manifest, no lineage, no staging (the worker half of a distributed write). `pin`/`redundancy`/`encrypt` policy applies; always immediate; refused on an ACT instance. No `content_type` — that is manifest metadata, set when the reference is linked. |
+| `SwarmFileSystem.resolve_stamp` | `(stamp=None)` | the batch id this instance would spend on a write, picked and validated now (`"auto"` resolved). In local-first mode: the batch the syncer pushes with. |
 | `SwarmFileSystem.link` | `(path, reference, size=None, metadata=None)` | stage a manifest entry pointing at an existing reference (the driver half): same lineage, transaction and metadata rules as a written file, but the commit has nothing to upload for it. `size` is advisory (else read from the node); the reference must match the lineage's refBytesSize (64 hex plain, 128 encrypted) and is not fetched here. |
 | `SwarmFileSystem.latest` | `(ref)` | the current head of `ref`'s lineage (read-your-writes). |
 | `SwarmFileSystem.sync` | `(timeout=None)` | local-first barrier: block until every commit is network-confirmed. |
@@ -268,3 +269,25 @@ instead of producing an EIO directory. Needs the `fuse` extra and libfuse 2.
 Command shape: `swarmfs mount bzz://<ref>[/path] <dir>`; unmount with
 `fusermount -u <dir>` or Ctrl-C. The `swarmfs` script has this one
 subcommand by decision — stamps, uploads and feeds are swarm-cli's job.
+
+## 13. Distributed writes (`swarmfs.dask`)
+
+Write a dask dataset to Swarm as **one** manifest. Needs the `dask` extra
+(`pip install "swarmfs[dask]"`). Partitions are written to Parquet in
+memory and uploaded on the workers with `put_blob`; their references come
+back to the driver, which `link`s them inside one transaction — so one
+commit, one root, and for `bzzf://` one feed update. Nothing unpicklable
+crosses a process boundary (each worker builds its own filesystem from
+`storage_options`), so this works on a real cluster, unlike dask's generic
+`dd.to_parquet` against a Swarm URL — which gives every worker its own
+lineage and therefore N unrelated roots.
+
+| name | signature | semantics |
+|---|---|---|
+| `dask.to_parquet` | `(ddf, url, storage_options=None, *, name_function=None, write_index=True, partition_on=None, write_metadata_file=False, compute_kwargs=None, **parquet_kwargs)` | write `ddf` to `bzz://new/<dir>`, `bzz://<root>/<dir>` or `bzzf://<owner>/<topic>/<dir>` → `DatasetWrite`. `name_function(i)` names partitions (default `part.<i>.parquet`); `partition_on` writes hive-style `col=value/` directories and drops those columns from the data; `compute_kwargs` go to `dask.compute` (e.g. `scheduler="processes"`). `write_metadata_file=True` raises `NotImplementedError` (a `_metadata` footer would have to aggregate every partition's metadata across processes). |
+| `dask.DatasetWrite` | `(url, root, written, sizes, batches)` | the result: `.root` is the new reference, `.written` path → data reference, `.paths` sorted, `.batches` the `(node, batch)` pairs used — **the dataset lives only as long as the shortest-lived of those batches**. |
+| `dask.DRIVER_ONLY_OPTIONS` | constant (`{"signer"}`) | storage options withheld from workers: the feed owner's key stays on the driver, which is the only process that publishes. |
+
+Local-first workers (`local_store=`) call `fs.sync()` before their
+references are reported, so the manifest never names content the network
+does not hold yet.

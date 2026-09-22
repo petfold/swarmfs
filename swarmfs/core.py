@@ -37,6 +37,7 @@ from .act import Act, ActManager, ActReader, ActUpload
 from ._listing import ListingBackend, detect_listing_backend
 from .commit import (CommitEngine, CommitResult, Staged, StagedLink,
                      StagedWrite, check_link_refsize)
+from .exceptions import StampError
 from .stamps import StampManager
 
 
@@ -1133,6 +1134,34 @@ class SwarmFileSystem(AsyncFileSystem):
         not yet hold.
         """
         return sync(self.loop, self._put_blob, data, stamp)
+
+    async def _resolve_stamp(self, stamp: str | None = None) -> str:
+        await self._setup()
+        if self._local is not None:
+            # local-first: commits spend nothing, the push owns postage —
+            # so the honest answer is the batch the syncer pushes with
+            batch = self._syncer.remote.stamp if self._syncer else None
+            if batch:
+                return batch
+            raise StampError(
+                "this local-first instance has no postage batch resolved yet: "
+                "commits are offline and the push spends the stamp, so there "
+                "is nothing to report until the syncer has run")
+        return await self._engine.stamps.resolve(stamp or self.stamp)
+
+    def resolve_stamp(self, stamp: str | None = None) -> str:
+        """The postage batch id this instance would spend on a write, picked
+        and validated *now* — ``"auto"`` resolved to a concrete batch.
+
+        A write validates its stamp anyway; this exposes the answer, which
+        matters when something else has to record it. A dataset assembled
+        across several nodes, for instance, lives only as long as the
+        shortest-lived batch that stamped a part of it, and only the
+        uploading process can say which batch that was (see
+        ``swarmfs.dask``). In local-first mode it reports the batch the
+        syncer pushes with, since the commit itself spends nothing.
+        """
+        return sync(self.loop, self._resolve_stamp, stamp)
 
     async def _link(self, path, reference, size=None, metadata=None) -> None:
         path = self._strip_protocol(path)
