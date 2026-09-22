@@ -78,7 +78,33 @@ chunk. This is the single biggest piece of real engineering in the project.
   `list_directory`'s prefetch follows its pruning rule exactly, or listing a
   directory would fetch every subdirectory node it only means to name — that
   regression is pinned by a test. Cutting the *count* needs the root index
-  (ROADMAP) or bee#5535.
+  or bee#5535.
+- **The root index (`index=True`, decided + implemented 2026-09-22)** is the
+  count-cutter: `.swarmfs/index.json` at the manifest root lists every
+  entry's path, reference, size and metadata, and `IndexedListingBackend`
+  answers `ls`/`find`/`info` from that one fetch — the third backend behind
+  the capability seam, so bee#5535 can still drop in beside it. Live on
+  2,000 files: `find()` 2.22 s → 0.05 s, `ls(detail=True)` 44.6 s → 0.31 s
+  (the index carries sizes, which otherwise cost a HEAD each); 369 KiB of
+  plain JSON. **Off by default because it changes the root** — an indexed
+  manifest is no longer the same reference as a plain bee upload of the
+  same tree. Four decisions worth keeping:
+  - **Maintained incrementally**: a commit reads the parent's index and
+    applies its own writes/removes. The only full walk is adopting a
+    manifest that has no index yet, once.
+  - **A commit with indexing off DELETES an index it finds.** Otherwise a
+    writer that stopped maintaining it would leave a file that answers
+    listings with content that is no longer there — the one way this
+    feature could corrupt what readers see.
+  - **Reading uses an index whenever present, verification included.** It
+    is reached *through* the manifest, so its chunks are verified like any
+    other, and it is the publisher's claim about the publisher's own
+    content — an endpoint cannot forge one, which is what `verify` defends
+    against.
+  - **`.swarmfs/` is reserved**: hidden from listings (it is bookkeeping,
+    not content) but answered honestly when asked for by name, because
+    reading it is how you debug an index. In local-first mode it is
+    journaled as *structure*, evictable before payload.
 
 ## The two hard engineering artifacts
 

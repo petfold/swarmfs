@@ -122,11 +122,17 @@ def _retrieved(task: asyncio.Future) -> None:
 
 @dataclass
 class FileEntry:
-    """A value entry found in a trie: ``path`` is relative to the walk root."""
+    """A value entry found in a trie: ``path`` is relative to the walk root.
+
+    ``size`` is None from a trie walk — a manifest entry records a reference,
+    not a length, so the size costs a request. A root index records it, which
+    is how an indexed listing answers without one per file.
+    """
 
     path: bytes
     reference: bytes
     metadata: dict[str, str] | None
+    size: int | None = None
 
 
 @dataclass

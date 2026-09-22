@@ -70,6 +70,7 @@ Storage options (constructor / `fsspec.filesystem("bzz", ...)`):
 | `act_timestamp` | None | read as of a moment in the history (`swarm-act-timestamp`) |
 | `allow_gateway` | False | explicit opt-in for a non-owned endpoint |
 | `verify` | None | BMT-verify fetched chunks; auto: on for gateways, off for own node |
+| `index` | False | maintain `.swarmfs/index.json` on every commit: one file listing every entry's path, reference, size and metadata, so `ls`/`find`/`info` cost **one fetch** instead of one per trie node (2,000 files, local node: `find()` 2.22 s → 0.05 s, `ls(detail=True)` 44.6 s → 0.31 s). Off by default — it changes the root. Reading uses an index whenever present; a commit with this off *deletes* one it finds, so a stale index can never answer. `.swarmfs/` is hidden from listings but readable by name |
 | `local_store` | None | path (or `LocalStore`) — local-first mode: offline commits, background push, local-first reads |
 | `block_size` | 1 MiB | readahead/block-cache size for opened files |
 | `timeout` | 120 | per-request seconds |

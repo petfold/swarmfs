@@ -229,16 +229,43 @@ node by node. `MantarayListingBackend` already shares a reference-keyed
    The benchmark lives in `tests/test_walk_scale.py` behind `-m bench`
    (deselected by default), with simulated latency so it measures the
    overlap rather than the machine.
-2. **Optional root index** (`index=True` on commit, default off): the
-   commit writes `.swarmfs/index.json` at the manifest root — every file's
-   path, data reference, size and metadata — and the listing backend, if it
-   finds that entry, answers `find`/`ls`/`info` from one fetch. Off by
-   default because it changes the root (the reference no longer equals a
-   plain bee upload of the same tree, and canonical-revisit rules in the
-   localstore must treat the index as structure). Consumers with big
-   datasets (brash, `sd.to_parquet`) turn it on. This is a third
-   `ListingBackend` behind the existing seam, so when bee#5535 ships all
-   three coexist.
+2. **Optional root index** (`index=True` on commit, default off) —
+   **done 2026-09-22**, as designed, plus what building it surfaced.
+
+   The commit writes `.swarmfs/index.json` at the manifest root (every
+   file's path, data reference, size and metadata) and
+   `IndexedListingBackend` answers `find`/`ls`/`info` from one fetch. Off
+   by default because it changes the root; a third backend behind the
+   existing seam, so bee#5535 still drops in beside it; the localstore
+   classifies the index as structure, as this paragraph required.
+
+   Live on 2,000 files (local Bee 2.8.2): `find()` **2.22 s → 0.05 s**, and
+   `ls(detail=True)` **44.6 s → 0.31 s** — the detail case is the extreme
+   one, because a trie listing pays 2,224 node fetches *and* 2,000 HEADs
+   for sizes, both of which the index carries. 369 KiB of plain,
+   uncompressed JSON for those 2,000 entries: being able to `cat` it is
+   worth more than the bytes.
+
+   Three things the design did not say:
+
+   - **It is maintained incrementally.** A commit reads the parent's index
+     and applies its own writes and removes — one fetch, not a walk. The
+     only full walk is adopting a manifest that has no index yet, once.
+   - **A commit with indexing off must DELETE an index it finds.** A writer
+     that stops maintaining one would otherwise leave a file that answers
+     listings with content that is no longer there. This is the only way
+     the feature could make readers see something false, so it is handled
+     in the engine, not left to discipline.
+   - **`.swarmfs/` is reserved**: hidden from listings, because it is
+     swarmfs's bookkeeping rather than the publisher's content, but
+     answered honestly when asked for by name — reading it is how you debug
+     an index.
+
+   On trust: an index is reached *through* the manifest, so under
+   verification its chunks are checked like any other, and it can only ever
+   be the publisher's own claim about their own content. A third party
+   cannot forge one, which is what `verify` exists to prevent, so reading
+   uses an index whenever one is present.
 
 Do not add a client-side prefix cache beyond fsspec's `dircache`; bzz roots
 are immutable, so the reference-keyed node cache is already the right cache.

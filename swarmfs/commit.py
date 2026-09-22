@@ -9,16 +9,51 @@ old root is untouched — every commit is automatically a snapshot.
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 from dataclasses import dataclass, field
 from typing import IO, Iterable
 
 from ._client import SwarmClient
 from .act import Act
-from .mantaray import Node, add, remove, save, unmarshal
+from .mantaray import (Node, NodeStore, add, iter_files, locate, remove,
+                       save, unmarshal)
 from .stamps import StampManager
 
 SPOOL_MAX_MEMORY = 16 * 2**20  # staged writes larger than this spill to disk
+
+# The optional root index (docs/distributed-writes.md §6): one file at the
+# manifest root listing every entry, so a reader answers find/ls/info from a
+# single fetch instead of one round trip per trie node. Off by default — it
+# changes the root, so a manifest written with it no longer equals a plain
+# bee upload of the same tree.
+RESERVED_DIR = ".swarmfs"
+INDEX_PATH = f"{RESERVED_DIR}/index.json"
+INDEX_VERSION = 1
+
+
+def index_bytes(entries: dict[str, dict]) -> bytes:
+    """Serialize the index. Plain, uncompressed JSON on purpose: it is
+    swarmfs's own bookkeeping, and being able to ``cat`` it is worth more
+    than the bytes."""
+    return json.dumps(
+        {"swarmfs-index": INDEX_VERSION, "entries": entries},
+        separators=(",", ":"), sort_keys=True,
+    ).encode()
+
+
+def parse_index(data: bytes) -> dict[str, dict] | None:
+    """The entries of a serialized index, or None if it is not one we
+    understand — an unknown version is not an error, it just means falling
+    back to the trie walk."""
+    try:
+        doc = json.loads(data)
+        if doc.get("swarmfs-index") != INDEX_VERSION:
+            return None
+        entries = doc["entries"]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+    return entries if isinstance(entries, dict) else None
 
 
 @dataclass
@@ -112,6 +147,7 @@ class CommitEngine:
         encrypt: bool = False,
         act: bool = False,
         act_publisher: str | None = None,
+        index: bool = False,
     ):
         self.client = client
         self.stamps = stamps
@@ -119,12 +155,67 @@ class CommitEngine:
         self.pin = pin
         self.redundancy = redundancy
         self.encrypt = encrypt
+        # maintain INDEX_PATH on every commit (see index_bytes); a commit
+        # with this off *removes* an index it finds, rather than leaving a
+        # stale one to answer listings with yesterday's content
+        self.index = index
         # ACT: protect every new root (the root node goes up with swarm-act;
         # children stay ordinary references, which is how Bee itself lays
         # out a protected directory). ``act_publisher`` is needed to *load*
         # a protected origin root when patching a lineage.
         self.act = act
         self.act_publisher = act_publisher
+
+    @staticmethod
+    async def _find_index(node: Node, load) -> bytes | None:
+        """The index blob's data reference, if this manifest carries one.
+
+        Nearly free when it does not: ``locate`` compares the first byte
+        against the root node's forks, which are already in hand, and gives
+        up without any fetch unless something really starts with ``.``.
+        """
+        store = NodeStore(load)
+        loc = await locate(store, node, _b(INDEX_PATH))
+        if loc is None or loc.fork is None or loc.leftover:
+            return None
+        child = await store.resolve(loc.fork)
+        return child.entry if child.has_entry else None
+
+    async def _index_entries(
+        self, root: str | None, node: Node, writes: dict[str, Staged],
+        removes: Iterable[str], uploaded: dict[str, str], load,
+    ) -> dict[str, dict]:
+        """The new index: the previous one, plus this commit's changes.
+
+        Maintained incrementally — reading the old index costs one fetch,
+        where re-deriving it from the trie costs one per node. The one time
+        that is unavoidable is adopting a manifest that has no index yet:
+        then the entries come from a full walk, once.
+        """
+        entries: dict[str, dict] = {}
+        if root is not None:
+            previous = await self._find_index(node, load)
+            if previous is not None:
+                entries = parse_index(await load(previous)) or {}
+            if not entries:
+                # no usable index on the parent: derive one from the trie,
+                # the only full walk this feature ever does
+                async for e in iter_files(NodeStore(load), node):
+                    path = e.path.decode("utf-8", "surrogateescape")
+                    if path != INDEX_PATH:
+                        entries[path] = {"r": e.reference.hex(),
+                                         **({"m": e.metadata} if e.metadata else {})}
+        for path in removes:
+            entries.pop(path, None)
+        for path, staged in writes.items():
+            entry: dict = {"r": uploaded[path]}
+            if staged.size is not None:
+                entry["s"] = staged.size
+            if staged.metadata:
+                entry["m"] = staged.metadata
+            entries[path] = entry
+        entries.pop(INDEX_PATH, None)  # an index never lists itself
+        return entries
 
     async def commit(
         self,
@@ -191,10 +282,26 @@ class CommitEngine:
         else:
             node = Node()
 
+        if self.index:
+            entries = await self._index_entries(
+                root, node, writes, removes, uploaded, load)
+        elif root is not None and await self._find_index(node, load) is not None:
+            # indexing is off but the parent carries an index: drop it rather
+            # than leave it answering listings with yesterday's content
+            removes = sorted(set(removes) | {INDEX_PATH})
+
         for path in removes:
             await remove(node, _b(path), load)
         for path, sw in writes.items():
             await add(node, _b(path), bytes.fromhex(uploaded[path]), sw.metadata, load)
+
+        if self.index:
+            blob = index_bytes(entries)
+            index_ref = await self.client.bytes_post(
+                blob, batch, pin=self.pin, redundancy=self.redundancy,
+                encrypt=self.encrypt)
+            await add(node, _b(INDEX_PATH), bytes.fromhex(index_ref),
+                      {"Content-Type": "application/json"}, load)
 
         async def saver(data: bytes) -> bytes:
             # manifest nodes are single chunks; parity applies to multi-chunk
@@ -256,10 +363,13 @@ class LocalFirstCommitEngine(CommitEngine):
     the constructor refuses a redundancy setting.
     """
 
-    def __init__(self, local, client: SwarmClient, concurrency: int = 8):
+    def __init__(self, local, client: SwarmClient, concurrency: int = 8,
+                 index: bool = False):
         self.local = local  # swarmfs.localstore.LocalStore, addressing="swarm"
         self.client = client
         self.concurrency = concurrency
+        self.index = index
+        self.encrypt = False  # refused at construction by the filesystem
         if getattr(local, "addressing", "swarm") != "swarm":
             raise ValueError(
                 'a local-first commit engine needs addressing="swarm" '
@@ -304,6 +414,12 @@ class LocalFirstCommitEngine(CommitEngine):
         else:
             node = Node()
 
+        if self.index:
+            entries = await self._index_entries(
+                root, node, writes, removes, uploaded, load)
+        elif root is not None and await self._find_index(node, load) is not None:
+            removes = sorted(set(removes) | {INDEX_PATH})
+
         for path in removes:
             await remove(node, _b(path), load)
         for path, sw in writes.items():
@@ -311,6 +427,14 @@ class LocalFirstCommitEngine(CommitEngine):
                       sw.metadata, load)
 
         node_refs: list[str] = []
+
+        if self.index:
+            # the index is structure, not payload: it is derivable from the
+            # trie, so the store may evict it first when space runs short
+            index_ref = await put_local(index_bytes(entries))
+            node_refs.append(index_ref)
+            await add(node, _b(INDEX_PATH), bytes.fromhex(index_ref),
+                      {"Content-Type": "application/json"}, load)
 
         async def saver(data: bytes) -> bytes:
             ref = await put_local(data)

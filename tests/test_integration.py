@@ -508,6 +508,52 @@ def test_dask_helper_live():
         feed_url, storage_options={"api_url": BEE}).compute()), 300)
 
 
+@pytest.mark.skipif(not STAMP, reason="writes need SWARMFS_TEST_STAMP")
+def test_root_index_live():
+    """§6 step 2 against a real node: a dataset committed with index=True
+    lists from one fetch, and says exactly what the trie says.
+
+    Measured separately on 2,000 files (local Bee 2.8.2): find() 2.22s ->
+    0.05s, and ls(detail=True) 44.6s -> 0.31s, because the index carries the
+    sizes that otherwise cost a HEAD each. This test keeps the *contract*
+    honest; the numbers live in ROADMAP.md.
+    """
+    from swarmfs import SwarmFileSystem
+    from swarmfs.commit import INDEX_PATH, parse_index
+
+    files = {f"dataset/part.{i:03d}.parquet": f"row {i}".encode() * (3 + i % 5)
+             for i in range(40)}
+    fs = SwarmFileSystem(api_url=BEE, stamp=STAMP, index=True,
+                         skip_instance_cache=True)
+    with fs.transaction:
+        for path, data in files.items():
+            fs.pipe_file(f"bzz://new/{path}", data)
+    root = fs.latest("new")
+
+    reader = SwarmFileSystem(api_url=BEE, skip_instance_cache=True)
+    found = reader.find(f"bzz://{root}/dataset")
+    assert found == sorted(f"{root}/{p}" for p in files)
+    listing = {e["name"].rsplit("/", 1)[1]: e
+               for e in reader.ls(f"bzz://{root}/dataset", detail=True)}
+    for path, data in files.items():
+        name = path.rsplit("/", 1)[1]
+        assert listing[name]["size"] == len(data)
+        assert reader.cat_file(f"bzz://{root}/{path}") == data
+
+    # the bookkeeping directory is hidden from listings but really there
+    assert all(".swarmfs" not in p for p in reader.find(f"bzz://{root}"))
+    entries = parse_index(reader.cat_file(f"bzz://{root}/{INDEX_PATH}"))
+    assert set(entries) == set(files)
+
+    # the same content through the trie — the index is an accelerator, not a
+    # second source of truth (the backend is swapped for the plain one)
+    from swarmfs._listing import MantarayListingBackend
+
+    trie = SwarmFileSystem(api_url=BEE, skip_instance_cache=True)
+    trie._backend = MantarayListingBackend(trie.client)
+    assert trie.find(f"bzz://{root}/dataset") == found
+
+
 @pytest.mark.skipif(not STAMP, reason="uploading needs SWARMFS_TEST_STAMP")
 def test_local_split_matches_bee():
     """The splitter's claim, checked against the only authority that matters:

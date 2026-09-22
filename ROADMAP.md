@@ -477,9 +477,23 @@ Design: `docs/distributed-writes.md`. First consumer: `brash` (Iceberg on Swarm)
       node's children are warmed at a time, so the fan-out bounds
       in-flight work (ten for a flat `part.00000…` dataset).
       `tests/test_walk_scale.py`, benchmark behind `-m bench`.
-- [ ] Listing: optional `index=True` root index as a third
-      `ListingBackend` — only when a consumer asks. Still the only way to
-      cut the *count* of round trips before bee#5535 lands.
+- [x] Listing: optional `index=True` root index as a third
+      `ListingBackend` (2026-09-22) — the only way to cut the *count* of
+      round trips before bee#5535 lands, and it cuts it to one.
+      `.swarmfs/index.json` lists every entry's path, reference, size and
+      metadata; the commit engine maintains it incrementally (read the
+      parent's index, apply this commit — a full trie walk happens once,
+      when adopting a manifest that has none). Measured live on 2,000
+      files (local Bee 2.8.2): `find()` 2.22 s → **0.05 s**, and
+      `ls(detail=True)` 44.6 s → **0.31 s**, because the index carries the
+      sizes that otherwise cost one HEAD per file. Index blob: 369 KiB for
+      2,000 entries, plain JSON. Off by default: it changes the root.
+      Decisions: reading uses an index whenever present (it is reached
+      *through* the verified manifest, so it is the publisher's own claim
+      about their own content, not a third party's); a commit with
+      indexing **off** deletes an index it finds, so a stale one can never
+      answer with yesterday's content; `.swarmfs/` is reserved — hidden
+      from listings, readable by name.
 - [ ] Decision: swarmfs emits bee's metadata keys only and passes
       `metadata=` through; layers namespace their own keys (§8).
 - [ ] Upstream `known_implementations` entries for `bzz`/`bzzf` (§9).

@@ -132,6 +132,44 @@ def test_engine_link_is_foreign(tmp_path):
         local.close()
 
 
+def test_index_blob_is_structure(tmp_path):
+    """An index is derivable from the trie, so the local store treats it as
+    structure — evictable before payload — like the manifest nodes."""
+    local = LocalStore(str(tmp_path / "store"))
+    try:
+        engine = LocalFirstCommitEngine(local, client=OfflineClient(), index=True)
+        res = asyncio.run(engine.commit(
+            None, {"a.txt": staged(b"alpha"), "b.txt": staged(b"beta")}, []))
+        state = dict(local.roots_below(CONFIRMED))[res.new_root]
+        assert set(res.written.values()) <= set(state.blobs)
+        assert set(state.structure).isdisjoint(res.written.values())
+        assert len(state.structure) >= 2  # the root node and the index
+    finally:
+        local.close()
+
+
+def test_offline_read_your_writes_through_the_index(tmp_path):
+    """The index is local like everything else: an offline listing answers
+    from it without the node existing at all."""
+    fs = SwarmFileSystem(client=OfflineClient(),
+                         local_store=str(tmp_path / "s"),
+                         redundancy=0, index=True, skip_instance_cache=True)
+    with fs.transaction:
+        for i in range(5):
+            fs.pipe_file(f"bzz://new/ds/part.{i}.bin", f"row {i}".encode())
+    root = fs.latest("new")
+
+    # (one instance: a LocalStore is single-writer, so a second filesystem on
+    # the same directory is refused — StoreLocked, by design)
+    found = fs.find(f"bzz://{root}/ds")
+    assert len(found) == 5
+    assert all(".swarmfs" not in p for p in found)
+    assert fs.cat(f"bzz://{root}/ds/part.3.bin") == b"row 3"
+    # the listing really came from the index, parsed off local disk
+    assert fs._backend._indexes[root] is not None
+    assert len(fs._backend._indexes[root]) == 5
+
+
 def test_engine_refuses_wrong_addressing(tmp_path):
     local = LocalStore(str(tmp_path / "s"), addressing="sha256")
     try:

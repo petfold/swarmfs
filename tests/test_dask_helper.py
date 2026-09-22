@@ -232,3 +232,23 @@ def test_local_first_workers_sync_before_linking(manifest, tmp_path, monkeypatch
     back = dd.read_parquet(f"bzz://{res.root}/offline",
                            storage_options=so).compute()
     assert len(back) == len(df)
+
+
+def test_indexed_dataset_lists_in_one_fetch(opts):
+    """The named consumer for the root index (§6): a partitioned dataset big
+    enough that walking the trie hurts."""
+    so, client = opts
+    ddf, _ = frame(rows=200, parts=8)
+    res = sd.to_parquet(ddf, "bzz://new/sales",
+                        storage_options={**so, "index": True})
+
+    import fsspec
+
+    from swarmfs.commit import parse_index
+
+    reader = fsspec.filesystem("bzz", client=FakeClient(client.store),
+                               skip_instance_cache=True)
+    assert len(reader.find(f"bzz://{res.root}/sales")) == 8
+    entries = parse_index(reader.cat_file(f"bzz://{res.root}/.swarmfs/index.json"))
+    assert set(entries) == {f"sales/{p}" for p in res.paths}
+    assert all(e["s"] > 0 for e in entries.values())  # sizes, for free

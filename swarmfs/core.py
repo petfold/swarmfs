@@ -209,6 +209,18 @@ class SwarmFileSystem(AsyncFileSystem):
         incompatible with ``verify`` and ``local_store``.
     client:
         Injection seam for a pre-built ``SwarmClient`` (used by tests).
+    index:
+        Maintain a root index (``.swarmfs/index.json``) on every commit: one
+        file listing every entry's path, data reference, size and metadata,
+        so a reader answers ``ls``/``find``/``info`` from a single fetch
+        instead of one round trip per trie node (2,224 of them for a
+        2,000-file dataset). Off by default because it **changes the root**:
+        an indexed manifest no longer has the same reference as a plain bee
+        upload of the same tree. Worth it for datasets big enough to feel
+        the walk; pointless for a handful of files. Reading uses an index
+        whenever one is present, whatever this is set to — and a commit
+        with it off *drops* an index it finds, so a stale one can never
+        answer with yesterday's content.
     local_store:
         Local-first mode (docs/localstore-design.md): path to a store
         directory (or a ready ``LocalStore``). Commits land on local disk
@@ -244,6 +256,7 @@ class SwarmFileSystem(AsyncFileSystem):
         act_history: str | None = None,
         act_publisher: str | None = None,
         act_timestamp: int | None = None,
+        index: bool = False,
         asynchronous: bool = False,
         loop=None,
         **storage_options,
@@ -330,14 +343,15 @@ class SwarmFileSystem(AsyncFileSystem):
             remote = BeeRemote(client=SyncSwarmClient(client=self.client),
                                stamp=stamp or "auto")
             self._syncer = Syncer(self._local, remote).start()
-            self._engine = LocalFirstCommitEngine(self._local, self.client)
+            self._engine = LocalFirstCommitEngine(self._local, self.client,
+                                                  index=index)
             weakref.finalize(self, _stop_local_first,
                              self._syncer, self._local)
         else:
             self._engine = CommitEngine(
                 self.client, StampManager(self.client), pin=pin,
                 redundancy=redundancy, encrypt=encrypt, act=act,
-                act_publisher=act_publisher,
+                act_publisher=act_publisher, index=index,
             )
         # staging, keyed by the *origin* root of each manifest lineage
         self._staged: dict[str, dict[str, Staged]] = {}
@@ -793,7 +807,9 @@ class SwarmFileSystem(AsyncFileSystem):
             return {
                 "name": path,
                 "type": "file",
-                "size": await (await self._get_reader()).bytes_size(st.reference.hex()),
+                # an index records the size; a trie entry does not, so ask
+                "size": (st.size if st.size is not None else
+                         await (await self._get_reader()).bytes_size(st.reference.hex())),
                 "reference": st.reference.hex(),
                 "mimetype": meta.get("Content-Type"),
                 "metadata": meta,
@@ -848,7 +864,7 @@ class SwarmFileSystem(AsyncFileSystem):
                         by_name[name] = {
                             "name": name,
                             "type": "file",
-                            "size": None,
+                            "size": f.size,
                             "reference": f.reference.hex(),
                             "mimetype": meta.get("Content-Type"),
                             "metadata": meta,
@@ -916,7 +932,7 @@ class SwarmFileSystem(AsyncFileSystem):
                     out[name] = {
                         "name": name,
                         "type": "file",
-                        "size": None,
+                        "size": e.size,
                         "reference": e.reference.hex(),
                         "mimetype": meta.get("Content-Type"),
                         "metadata": meta,
