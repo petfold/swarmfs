@@ -19,8 +19,11 @@
 #
 # First start syncs the postage-contract state from the batch snapshot to
 # the chain tip; /health answers "ok" long before that finishes, while
-# /topology still returns 503 "Node is syncing". That warm-up is a one-time
-# cost per data-dir — keep the directory and later starts are quick.
+# /topology still returns 503 "Node is syncing". Measured on a fresh
+# data-dir (Bee 2.8.2, public Gnosis RPC, 2026-09-22): ready ~12 minutes
+# after start, then the witnessed-confirmation test passed in 23 s with a
+# single connected peer. That warm-up is a one-time cost per data-dir —
+# keep the directory and later starts are quick.
 set -euo pipefail
 
 DATA_DIR="${1:-$HOME/.bee-witness}"

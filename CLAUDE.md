@@ -629,9 +629,12 @@ See `ROADMAP.md`. Short version:
   2026-09-22: a public gateway (`https://api.gateway.ethswarm.org` —
   passes in ~2 s) or a self-hosted download-only Bee via
   `scripts/witness-node.sh` (`swap-enable: false` = ultra-light: no
-  funding, no chequebook, no stamp; its first start must sync postage
-  state from the batch snapshot to the chain tip, which is slow and a
-  one-time cost per data-dir). A gateway is sound here because the
+  funding, no chequebook, no stamp — measured: ready ~12 min after a
+  fresh start, since it first syncs postage state from the batch
+  snapshot to the chain tip, a one-time cost per data-dir; the test then
+  passed in 23 s with **one** connected peer, which is all a retrieval
+  needs). Readiness is `/topology` answering 200 — `/health` says `ok`
+  while the node is still syncing and cannot serve. A gateway is sound here because the
   witness is untrusted by construction — it only answers `GET /bytes` and
   the caller hashes every byte against the reference, so a dishonest
   witness can only cause a false negative. A reverse **proxy** in front of
