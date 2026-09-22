@@ -413,6 +413,34 @@ makes Parquet predicate pushdown and zarr chunk reads viable.
 - **Listings stay in feed coordinates** (`<owner>/<topic>/…`), preserving the stable-URL
   illusion instead of leaking resolved root hashes.
 
+## Distributed writes (planned 2026-09-22; design in docs/distributed-writes.md)
+
+- **Cross-process writes compose through references, not through shared
+  staging.** Workers `put_blob` → reference; the driver `link`s references
+  into one lineage and commits once. `StagedLink` sits beside `StagedWrite`;
+  the commit engine uploads writes and passes links through. Same lineage,
+  transaction, refBytesSize and ACT rules as written files.
+- **Linked references are foreign** under `local_store=` (not persisted,
+  not pushed) — the uploader owns its blob's network residency, so a
+  local-first worker must `sync()` before its reference is linked. The
+  `swarmfs.dask` helper enforces this; a caller using the primitives
+  directly is told in the docstring.
+- **A dataset's lifetime is the shortest batchTTL among the batches that
+  stamped its parts.** With one node per cluster this is one batch; with
+  several, the helper reports the (node, batch) set and renewal stays with
+  the caller — swarmfs never chases foreign batches.
+- **The generic dask path (`dd.to_parquet` → `open("wb")` on workers) yields
+  N roots.** Documented, not hidden; `swarmfs.dask.to_parquet` is the
+  supported route. A `stage_only=` option to make the generic path record
+  links is a possible later addition, not a promise.
+- **Pinned views**: `bzzf` with `at_root=`/`at=` resolves the stable URL
+  against a fixed root — read-only, no path rewriting, works for every
+  fsspec consumer. This is how a table layer gets reproducible reads of
+  mutable locations.
+- **Metadata keys**: swarmfs emits `Content-Type`/`Filename` only and passes
+  `metadata=` through; consumers namespace their keys (`brash.*`,
+  `swarmlite.*`). Closed the roadmap's open decision.
+
 ## Prior art: ipfsspec (study, don't copy wholesale)
 
 `ipfsspec` (IPFS backend in the official fsspec org) is the closest existing analog and

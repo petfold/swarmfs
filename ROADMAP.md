@@ -420,6 +420,29 @@ nothing evicts against a dying batch.
       an accurate message. Error messages and docs that named the
       `feeds` extra for keccak-related failures are corrected.
 
+## Distributed writes & pinned mounts (planned 2026-09-22)
+
+Design: `docs/distributed-writes.md`. First consumer: `brash` (Iceberg on Swarm).
+
+- [ ] `fs.put_blob(data) -> reference` — bare data upload through
+      `bytes_post`, stamp resolved first; the worker-side primitive.
+- [ ] `fs.link(path, reference, size=, metadata=)` — stage a manifest entry
+      pointing at an existing reference (`StagedLink`); commit skips its
+      upload. Lineage/refBytesSize rules as for writes; foreign under
+      `local_store`.
+- [ ] `swarmfs.dask.to_parquet(ddf, url)` — partitions uploaded on workers,
+      one manifest on the driver, one bzzf publish. Returns root + the
+      (node, batch) pairs used. Local-first workers `sync()` before
+      reporting references.
+- [ ] bzzf `at_root=` / `at=` storage options (frozen and time-travelled
+      views, read-only) and a real `modified()` for bzzf roots.
+- [ ] Listing: measure the trie walk; bounded-concurrency BFS if
+      sequential; `bench_find_2000_files`. Optional `index=True` root index
+      as a third `ListingBackend` — only when a consumer asks.
+- [ ] Decision: swarmfs emits bee's metadata keys only and passes
+      `metadata=` through; layers namespace their own keys (§8).
+- [ ] Upstream `known_implementations` entries for `bzz`/`bzzf` (§9).
+
 ## Later / opportunistic
 
 - [ ] Server-side listing endpoint support: when the upstream endpoint (ethersphere/bee#5535,
@@ -518,4 +541,8 @@ nothing evicts against a dying batch.
   light-node setup. Remaining: redundancy level as a write kwarg (still "later").
 - Whether `bzz://` writes should error loudly ("captured the new ref?") vs. return it quietly.
 - Where the local write spool lives and its cleanup policy.
-- Mantaray metadata key conventions to emit on write (align with any upstream standardization).
+- ~~Mantaray metadata key conventions to emit on write~~ — **decided 2026-09-22**:
+  swarmfs emits bee's own keys only (`Content-Type`, `Filename`) and passes caller
+  `metadata=` through untouched; it defines no keys of its own, and layers above
+  namespace theirs (`brash.*`, `swarmlite.*`, `ontodag.*`). If Bee standardizes keys
+  upstream, swarmfs follows. See `docs/distributed-writes.md` §8.
