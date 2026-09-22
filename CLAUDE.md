@@ -621,3 +621,21 @@ See `ROADMAP.md`. Short version:
   with two implementations (client-side, server-side) so the server path drops in later.
 - Prefer real integration tests against a local Bee over heavy mocking, but keep a fast unit
   layer that runs without a node (fixture-based).
+- **The three further-gated live tests, and how to satisfy them** (README
+  has the table): `SWARMFS_TEST_SPEND=<xBZZ>` for the real topup — the
+  amount is the consent; `SWARMFS_TEST_REF` for read-only runs without a
+  stamp; and `SWARMFS_TEST_WITNESS=<url>` for the witnessed-confirmation
+  test, which needs a genuinely **second** node. Two ways, both verified
+  2026-09-22: a public gateway (`https://api.gateway.ethswarm.org` —
+  passes in ~2 s) or a self-hosted download-only Bee via
+  `scripts/witness-node.sh` (`swap-enable: false` = ultra-light: no
+  funding, no chequebook, no stamp; its first start must sync postage
+  state from the batch snapshot to the chain tip, which is slow and a
+  one-time cost per data-dir). A gateway is sound here because the
+  witness is untrusted by construction — it only answers `GET /bytes` and
+  the caller hashes every byte against the reference, so a dishonest
+  witness can only cause a false negative. A reverse **proxy** in front of
+  the uploading node is *not* a witness: it serves the uploader's own copy
+  and the test would pass proving nothing. Falsified rather than assumed:
+  pointed at a dead endpoint the test fails with `TimeoutError` after
+  240 s, so a pass really does mean the witness fetched.

@@ -320,12 +320,24 @@ WITNESS = os.environ.get("SWARMFS_TEST_WITNESS")  # a second node's API url
 @pytest.mark.skipif(not (BEE and WITNESS),
                     reason="set SWARMFS_TEST_BEE and SWARMFS_TEST_WITNESS "
                            "(a second node — no gateway default: same-node "
-                           "stewardship already checks the network)")
+                           "stewardship already checks the network). Two "
+                           "ways to get one: SWARMFS_TEST_WITNESS="
+                           "https://api.gateway.ethswarm.org (someone "
+                           "else's node, nothing to install), or run your "
+                           "own download-only one: scripts/witness-node.sh")
 def test_live_witnessed_confirmation(tmp_path):
     """Optional belt-and-braces: confirmation's verify fetches through an
     independent second node. Not required for network proof — stewardship
     on the uploading node already asks the network peer-to-peer — this
-    covers the distrusted-own-node scenario only."""
+    covers the distrusted-own-node scenario only.
+
+    The witness needs no stamp, no funding and no trust: it only answers
+    GET /bytes, and every byte it returns is hashed against the reference
+    it was asked for, so a lying witness can only cause a false *negative*.
+    That is what makes a public gateway a legitimate witness — and a
+    reverse proxy in front of the uploading node an illegitimate one: it
+    would serve the uploader's own copy and prove nothing.
+    """
     pytest.importorskip("eth_hash")
     store = LocalStore(str(tmp_path / "wit"), addressing="swarm")
     remote = BeeRemote(BEE, stamp=os.environ.get("SWARMFS_TEST_STAMP",

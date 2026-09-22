@@ -367,3 +367,18 @@ pytest                                   # 436 tests; the live ones skip with no
 SWARMFS_TEST_BEE=http://localhost:1633 \
 SWARMFS_TEST_STAMP=<batch-id> pytest tests/test_integration.py
 ```
+
+Three live tests are gated further, because they need something the suite
+cannot conjure:
+
+| gate | what it needs | how to satisfy it |
+|---|---|---|
+| `SWARMFS_TEST_SPEND=<xBZZ>` | real money: it tops up a real batch | the amount doubles as consent — `0.01` is plenty |
+| `SWARMFS_TEST_WITNESS=<url>` | a **second, independent node**, to prove the *network* serves a freshly pushed blob and not just the uploading node's disk | quickest: `https://api.gateway.ethswarm.org` — someone else's node, nothing to install. Self-hosted: `scripts/witness-node.sh`, which runs a download-only Bee (swap disabled: no funding, no chequebook, no stamp) |
+| `SWARMFS_TEST_REF=<reference>` | existing content, when you have no stamp to upload the fixture | any collection reference on the network |
+
+The witness is untrusted by construction — it only answers `GET /bytes`,
+and every byte it returns is hashed against the reference it was asked
+for, so a dishonest one can only cause a false *negative*. A reverse proxy
+in front of your own node is therefore not a witness: it would serve the
+uploader's own copy and prove nothing.
