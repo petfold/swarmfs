@@ -88,7 +88,7 @@ Methods beyond the fsspec standard surface:
 | `SwarmFileSystem.read_reference` | `(ref, start=None, end=None)` | raw-reference read (bytes behind a ref, optionally a range) through the policy reader — verification and local-first apply. For paths inside manifests use `cat`/`open`. |
 | `SwarmFileSystem.reference_size` | `(ref)` | size behind a raw reference, same path (local-first answers without reading the blob). |
 | `SwarmFileSystem.discard_staged` | `()` | drop staged writes without committing. |
-| `SwarmFileSystem.modified` | `(path)` | fixed epoch constant (content is immutable at a ref); checks existence. |
+| `SwarmFileSystem.modified` | `(path)` | fixed epoch constant (content is immutable at a ref); checks existence. `SwarmFeedFileSystem` overrides it with the feed update's publication time. |
 | `SwarmFileSystem.publisher_key` | `()` | this node's compressed public key — what readers pass as `act_publisher` for content this node protects, and what another publisher adds as a grantee. |
 | `SwarmFileSystem.create_grantees` | `(keys)` | ACT: create a grantee list → `GranteeList(reference, history)`; publish with `act_history=<that history>`. Spends a stamp. |
 | `SwarmFileSystem.grantees` | `(reference)` | ACT: the public keys on a grantee list (free). |
@@ -101,7 +101,13 @@ one).
 `SwarmFeedFileSystem` adds `signer=` (owner's private key hex, required
 for writes) and `feed_ttl=` (feed resolution cache, 15 s); feeds are
 last-write-wins. In local-first mode the feed update publishes only after
-network confirmation.
+network confirmation. Two more make the mount a **pinned read-only view**
+of the same stable URL: `at_root=<reference>` freezes it to one root
+(the feed is never looked up) and `at=<unix seconds | datetime | ISO-8601>`
+to whatever it pointed at then (resolved once per feed, then frozen; naive
+times are read as UTC). Writes raise `FeedError`; `modified()` on a bzzf
+path is the feed update's publication time, not the epoch constant (an
+`at_root` view keeps the constant — a frozen root never changes).
 
 ## 5. Client tier
 
@@ -194,7 +200,8 @@ surface: swarmlite builds its snapshot history and publish path on it
 | name | signature | semantics |
 |---|---|---|
 | `feeds.FeedSigner` | `(private_key)` | the owner's key; signs feed updates (`.owner` / `.owner_hex`). |
-| `feeds.FeedOps` | `(client)` | feed operations over a `SwarmClient` — `update(signer, topic, index, ref, stamp)` publishes one signed update. |
+| `feeds.FeedOps` | `(client)` | feed operations over a `SwarmClient` — `update(signer, topic, index, ref, stamp)` publishes one signed update and returns its timestamp; `latest(owner, topic, verify=False)` resolves the head; `at_index(owner, topic, index, verify=False)` an update by sequence index (no lookup: the address is derived); `at(owner, topic, when, verify=False)` the update in force at a unix time — a client-side binary search over `/chunks`, because Bee ignores `?at=` on sequence feeds. |
+| `feeds.FeedUpdate` | `(reference, index, next_index, timestamp=None)` | one resolved update; `timestamp` is the publication time from the bee-js payload (None for formats that carry none). |
 | `feeds.owner_bytes` | `(owner)` | 40-hex owner address → bytes (0x tolerated). |
 | `feeds.topic_bytes` | `(topic)` | human topic string (keccak'd, bee-js convention) or raw 64-hex → bytes. |
 | `feeds.feed_identifier` | `(topic, index)` | the SOC identifier of update `index` of a sequence feed. |

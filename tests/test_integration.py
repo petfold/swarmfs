@@ -306,6 +306,65 @@ def test_bzzf_two_mounts_live():
     )
 
 
+@pytest.mark.skipif(not STAMP, reason="writes need SWARMFS_TEST_STAMP")
+def test_bzzf_pinned_views_live():
+    """Frozen and time-travelled mounts of a live feed (§7): the same URL,
+    read as of a root or as of a moment, against a real node."""
+    pytest.importorskip("eth_keys")
+    import datetime
+    import secrets
+
+    from swarmfs import SwarmFeedFileSystem
+    from swarmfs.feeds import FeedError, FeedSigner
+
+    key = secrets.token_hex(32)
+    owner = FeedSigner(key).owner_hex
+    topic = "swarmfs-pinned"
+    url = f"bzzf://{owner}/{topic}/state.txt"
+
+    w = SwarmFeedFileSystem(api_url=BEE, stamp=STAMP, signer=key, feed_ttl=0,
+                            skip_instance_cache=True)
+    w.pipe_file(url, b"version one")
+    first_root = w.latest(f"bzzf://{owner}/{topic}")
+    # modified() is the feed update's publication time, not a constant
+    t1 = w.modified(url)
+    assert t1 > datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
+
+    time.sleep(2)
+    w.pipe_file(url, b"version two")
+    t2 = w.modified(url)
+    assert t2 > t1
+    _poll(lambda: SwarmFeedFileSystem(
+        api_url=BEE, feed_ttl=0, skip_instance_cache=True).cat_file(url),
+        b"version two")
+
+    # frozen at a root: the feed is never consulted
+    frozen = SwarmFeedFileSystem(api_url=BEE, at_root=first_root,
+                                 skip_instance_cache=True)
+    assert frozen.cat_file(url) == b"version one"
+    assert frozen.ls(f"bzzf://{owner}/{topic}", detail=False) == [
+        f"{owner}/{topic}/state.txt"]
+
+    # as of a moment between the two updates
+    between = int(t1.timestamp()) + 1
+    past = SwarmFeedFileSystem(api_url=BEE, at=between, skip_instance_cache=True)
+    assert past.cat_file(url) == b"version one"
+    assert past.modified(url) == t1
+    now = SwarmFeedFileSystem(api_url=BEE, at=int(t2.timestamp()) + 60,
+                              skip_instance_cache=True)
+    assert now.cat_file(url) == b"version two"
+    before = SwarmFeedFileSystem(api_url=BEE, at=int(t1.timestamp()) - 3600,
+                                 skip_instance_cache=True)
+    with pytest.raises(FileNotFoundError, match="did not exist yet"):
+        before.cat_file(url)
+
+    # a view is read-only even holding the key
+    ro = SwarmFeedFileSystem(api_url=BEE, stamp=STAMP, signer=key,
+                             at_root=first_root, skip_instance_cache=True)
+    with pytest.raises(FeedError, match="pinned read-only view"):
+        ro.pipe_file(url, b"nope")
+
+
 @pytest.mark.skipif(not STAMP, reason="upload fixture needs SWARMFS_TEST_STAMP")
 def test_dask_partitioned_parquet_live(fs):
     """The v0 exit criterion against a *real* node: upload a partitioned

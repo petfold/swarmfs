@@ -30,6 +30,7 @@ here, that's a bug — please open an issue.
 - [DuckDB](#duckdb)
 - [Writing more than one file at a time](#writing-more-than-one-file-at-a-time)
 - [Getting a stable URL: feeds](#getting-a-stable-url-feeds)
+  - [Reading a feed as of a moment](#reading-a-feed-as-of-a-moment)
 - [Restricting who can read: ACT](#restricting-who-can-read-act)
 - [Mounting Swarm as a folder](#mounting-swarm-as-a-folder)
 - [Also works with](#also-works-with)
@@ -428,6 +429,38 @@ feed's owner is allowed to update it. See the
 [feeds section](../README.md#mutable-feeds-bzzf) of the README for the full
 picture, including what "last-write-wins" means if two processes update the
 same feed concurrently.
+
+### Reading a feed as of a moment
+
+A `bzzf://` URL normally means "whatever is there now", which is the point
+— but a pipeline that has to be reproducible, or a reader that wants the
+version it saw yesterday, needs the same URL to stop moving. Two storage
+options pin it, and they work for every fsspec consumer because the *paths*
+stay the same — only the filesystem's options change:
+
+```python
+# frozen at one root — the feed is never even looked up
+snap = fsspec.filesystem("bzzf", at_root="<64-hex reference>")
+snap.cat(f"bzzf://{owner}/my-app/config.json")      # that exact version
+
+# as of a moment: unix seconds, a datetime, or ISO-8601 (naive = UTC)
+past = fsspec.filesystem("bzzf", at="2026-09-01T12:00Z")
+past.cat(f"bzzf://{owner}/my-app/config.json")      # what it said then
+
+import dask.dataframe as dd
+dd.read_parquet(f"bzzf://{owner}/sales/",           # every consumer, unchanged
+                storage_options={"at": "2026-09-01T12:00Z"})
+```
+
+Both are read-only views: a write raises rather than silently advancing the
+feed past the version you pinned. `fs.modified(path)` on an ordinary
+`bzzf://` mount tells you when the update you are reading was published
+(useful for cache invalidation); on a frozen view it stays at the epoch,
+because a fixed root cannot change.
+
+Where does the reference for `at_root=` come from? `fs.latest("bzzf://owner/topic")`
+after a write, or `fs.commit_log[-1].new_root` — the same value the write
+path already hands you.
 
 ## Restricting who can read: ACT
 

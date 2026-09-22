@@ -448,8 +448,15 @@ Design: `docs/distributed-writes.md`. First consumer: `brash` (Iceberg on Swarm)
       one manifest on the driver, one bzzf publish. Returns root + the
       (node, batch) pairs used. Local-first workers `sync()` before
       reporting references.
-- [ ] bzzf `at_root=` / `at=` storage options (frozen and time-travelled
-      views, read-only) and a real `modified()` for bzzf roots.
+- [x] bzzf `at_root=` / `at=` storage options (frozen and time-travelled
+      views, read-only) and a real `modified()` for bzzf roots
+      (2026-09-22). `at=` takes unix seconds, a datetime or ISO-8601
+      (naive = UTC) and is resolved **client-side**: measured live, Bee
+      2.8.2 ignores `?at=` on sequence feeds and always answers with the
+      head, so `FeedOps.at()` binary-searches the updates' payload
+      timestamps over `/chunks` instead. A pinned feed resolves once and
+      never looks up again; writes raise `FeedError` even with a signer.
+      Live-validated (`test_bzzf_pinned_views_live`).
 - [ ] Listing: measure the trie walk; bounded-concurrency BFS if
       sequential; `bench_find_2000_files`. Optional `index=True` root index
       as a third `ListingBackend` — only when a consumer asks.

@@ -374,11 +374,12 @@ registered swarmfs filesystem failed outright until this was overridden.
 returns a fixed constant (the epoch) — the honest answer, since `bzz://`
 content is content-addressed and immutable at a fixed reference: there is no
 real last-modified time to report, and a constant can never spuriously
-invalidate a downstream cache. `bzzf://` mounts inherit this unchanged; it
-does **not** reflect a feed's most recent update (the SOC payload's
-timestamp is parsed in `feeds.py` but currently discarded) — a real
-per-feed `modified()` is a reasonable future addition but wasn't in scope
-for this fix.
+invalidate a downstream cache. `bzz://` keeps that answer. `bzzf://` no longer does
+(2026-09-22): `SwarmFeedFileSystem.modified()` returns the **feed update's
+publication time**, parsed from the SOC payload (`FeedUpdate.timestamp`,
+which `feeds.py` previously parsed and discarded) — a feed does move, and
+DuckDB/table readers cache by mtime. An `at_root=` view keeps the epoch
+constant: a frozen root never changes.
 
 ## Base class and async
 
@@ -453,10 +454,23 @@ docs/distributed-writes.md)
   N roots.** Documented, not hidden; `swarmfs.dask.to_parquet` is the
   supported route. A `stage_only=` option to make the generic path record
   links is a possible later addition, not a promise.
-- **Pinned views**: `bzzf` with `at_root=`/`at=` resolves the stable URL
-  against a fixed root — read-only, no path rewriting, works for every
-  fsspec consumer. This is how a table layer gets reproducible reads of
-  mutable locations.
+- **Pinned views** (implemented 2026-09-22): `bzzf` with `at_root=`/`at=`
+  resolves the stable URL against a fixed root — read-only, no path
+  rewriting, works for every fsspec consumer. This is how a table layer
+  gets reproducible reads of mutable locations. A pinned feed resolves
+  once and its cache entry never expires; writes raise `FeedError` from
+  staging, even when the instance holds the signer (the pin forbids it,
+  not the key).
+- **`at=` is resolved client-side, because Bee's `?at=` does nothing for
+  sequence feeds.** Measured live on 2026-09-22 (Bee 2.8.2): `GET
+  /feeds/<owner>/<topic>?type=sequence&at=<t>` answers with the head index
+  for every `t`, including one *before* the first update — so trusting it
+  would have silently served the latest content as "the past". Feed update
+  addresses need no lookup (`keccak256(keccak256(topic‖index) ‖ owner)`),
+  so `FeedOps.at()` binary-searches `/chunks` on the payload timestamps:
+  O(log n) fetches, one assumption (a sequence feed's timestamps don't go
+  backwards), and a loud `FeedError` for payload formats that carry no
+  timestamp.
 - **Metadata keys**: swarmfs emits `Content-Type`/`Filename` only and passes
   `metadata=` through; consumers namespace their keys (`brash.*`,
   `swarmlite.*`). Closed the roadmap's open decision.

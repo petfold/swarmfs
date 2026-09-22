@@ -211,6 +211,9 @@ are immutable, so the reference-keyed node cache is already the right cache.
 
 ## 7. Pinned and time-travelled feed mounts (read side)
 
+*Implemented 2026-09-22 — with one correction below: Bee's `at=` does not
+work for sequence feeds, so the time lookup is client-side.*
+
 A bzzf mount is a live view. A table layer needs two more readings of the
 same URL, and both are one lookup away:
 
@@ -220,18 +223,33 @@ fsspec.filesystem("bzzf", at="2026-09-01T12:00Z")    # feed as of a time (Bee: G
 ```
 
 `at_root` bypasses feed resolution entirely (a bzzf path is then just a bzz
-path with a stable prefix); `at=` resolves once via the feed's `at`
-lookup and then behaves like `at_root`. Writes are refused on both (they
-are views). The point: every fsspec consumer — DuckDB's registered
+path with a stable prefix); `at=` resolves once — per feed, so one instance
+can view several feeds as of the same moment — and then behaves like
+`at_root`. Writes are refused on both (they are views), from staging, even
+when the instance holds the signer.
+
+**Correction, measured live (Bee 2.8.2, 2026-09-22): `GET /feeds?at=` is
+not the lookup.** For sequence feeds Bee ignores it and returns the head
+index for every timestamp, including one before the feed's first update —
+so the design's "resolve via the feed's `at` lookup" would have served the
+*latest* content as "the past", silently. The search is therefore
+client-side and cheap: an update's SOC address is
+`keccak256(keccak256(topic‖index) ‖ owner)`, computable without any
+lookup, so `FeedOps.at()` binary-searches `/chunks` on the payload
+timestamps — O(log n) fetches. It assumes a sequence feed's timestamps do
+not go backwards, and refuses loudly (`FeedError`) for payload formats
+that carry no timestamp at all (a bare reference, a wrapped root chunk). The point: every fsspec consumer — DuckDB's registered
 filesystem, dask, pyarrow — gets tamper-evident, reproducible reads of a
 mutable URL with no path rewriting, because the *paths* Iceberg records are
 `bzzf://` and the *pin* is a storage option.
 
-While here: `SwarmFileSystem.modified()` returns the epoch for bzzf too
-(`CLAUDE.md` notes the feed timestamp is parsed and discarded). Return the
-feed update's timestamp for bzzf roots. DuckDB and Iceberg readers use it
-for cache invalidation; a live view that never changes its mtime defeats
-them.
+While here: `SwarmFileSystem.modified()` returned the epoch for bzzf too
+(`CLAUDE.md` noted the feed timestamp was parsed and discarded). Done —
+`SwarmFeedFileSystem.modified()` now reports the feed update's publication
+time (`FeedUpdate.timestamp`), for both a resolved head and an `at=` view;
+an `at_root=` view keeps the constant, since a frozen root cannot change.
+DuckDB and Iceberg readers use it for cache invalidation; a live view that
+never changes its mtime defeats them.
 
 ## 8. Metadata keys — closing the open decision
 
@@ -260,7 +278,9 @@ precedent entry to copy.
    `test_engine_link_is_foreign` / `test_put_blob_journals_a_one_blob_root`
    in `tests/test_localfirst_fs.py`. The live worker-style round trip
    (two real processes, one node) is still owed.
-2. §7 `at_root`/`at` + bzzf `modified()`. Also small; unblocks brash reads.
+2. ~~§7 `at_root`/`at` + bzzf `modified()`~~ **done 2026-09-22** —
+   `tests/test_feedfs.py` (pinned/time-travelled views, refusals, mtime)
+   and `test_bzzf_pinned_views_live` against Bee 2.8.2.
 3. §3 `swarmfs.dask` helper with the §4/§5 rules, and the User Guide's
    honest paragraph about the generic path.
 4. §6 step 1 (measure/parallelise); step 2 only when a consumer asks.

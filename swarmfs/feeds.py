@@ -129,6 +129,11 @@ class FeedUpdate:
     reference: str  # hex of the root reference the feed points at
     index: int  # index of this update
     next_index: int
+    # publication time from the bee-js payload (timestamp ‖ ref); None for
+    # payload formats that carry none — a bare reference or a wrapped root
+    # chunk. This is what `bzzf://` reports as an mtime, and what `at=`
+    # searches on.
+    timestamp: int | None = None
 
 
 class FeedOps:
@@ -159,27 +164,79 @@ class FeedOps:
         next_index = (
             int.from_bytes(bytes.fromhex(next_hex), "big") if next_hex else index + 1
         )
+        upd = await self.at_index(owner, topic, index, verify)
+        upd.next_index = next_index
+        return upd
+
+    async def at_index(
+        self, owner: bytes, topic: bytes, index: int, verify: bool = False
+    ) -> FeedUpdate:
+        """The update at a known sequence index — no lookup needed: the SOC
+        address is ``keccak256(keccak256(topic ‖ index) ‖ owner)``."""
         address = soc_address(feed_identifier(topic, index), owner)
         soc = await self.client.chunk_get(address.hex())
         if verify:
             verify_soc(soc, owner, address)
-        reference = self._reference_from_soc(soc)
-        return FeedUpdate(reference=reference, index=index, next_index=next_index)
+        reference, timestamp = self._payload_from_soc(soc)
+        return FeedUpdate(reference=reference, index=index,
+                          next_index=index + 1, timestamp=timestamp)
+
+    async def at(
+        self, owner: bytes, topic: bytes, when: int, verify: bool = False
+    ) -> FeedUpdate | None:
+        """The update in force at ``when`` (unix seconds): the newest one
+        published at or before it, or None when the feed's first update is
+        later than ``when`` (it did not exist yet).
+
+        The search is **client-side, by measurement**: Bee 2.8.2 accepts
+        ``?at=`` on ``GET /feeds`` but ignores it for sequence feeds — every
+        value, including one before the first update, answers with the head
+        index (probed live, 2026-09-22). Update addresses need no lookup, so
+        this binary-searches ``/chunks`` in O(log n) fetches instead.
+
+        It assumes a sequence feed's timestamps do not go backwards, which
+        holds for a feed with one writer at a time (bzzf feeds are
+        last-write-wins anyway).
+        """
+        head = await self.latest(owner, topic, verify)
+        if head is None:
+            return None
+        if head.timestamp is None:
+            raise FeedError(
+                "this feed's updates carry no timestamp (payload format "
+                "without one), so 'as of a time' cannot be answered — pin "
+                "the view with at_root=<reference> instead")
+        if head.timestamp <= when:
+            return head
+        lo, hi, best = 0, head.index - 1, None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            upd = await self.at_index(owner, topic, mid, verify)
+            if upd.timestamp is None:
+                raise FeedError(
+                    f"feed update {mid} carries no timestamp; 'as of a time' "
+                    "needs them on every update")
+            if upd.timestamp <= when:
+                best, lo = upd, mid + 1
+            else:
+                hi = mid - 1
+        return best
 
     @staticmethod
-    def _reference_from_soc(soc: bytes) -> str:
+    def _payload_from_soc(soc: bytes) -> tuple[str, int | None]:
+        """(reference, publication time) from a feed update chunk."""
         if len(soc) < SOC_PAYLOAD_OFFSET:
             raise FeedError(f"feed update chunk too short: {len(soc)} bytes")
         payload = soc[SOC_PAYLOAD_OFFSET:]
         # bee-js "reference" format: timestamp(8) + ref(32|64); tolerate a
         # bare ref without timestamp
         if len(payload) in (40, 72):
-            return payload[8:].hex()
+            return payload[8:].hex(), int.from_bytes(payload[:8], "big")
         if len(payload) in (32, 64):
-            return payload.hex()
+            return payload.hex(), None
         # "wrapped chunk" format: the update wraps the content's root chunk
         # itself; its BMT address is the reference
-        return chunk_address(soc[SOC_SPAN_OFFSET:]).hex()
+        return chunk_address(soc[SOC_SPAN_OFFSET:]).hex(), None
 
     async def update(
         self,
@@ -188,9 +245,11 @@ class FeedOps:
         index: int,
         reference: str,
         stamp: str,
-    ) -> None:
-        """Publish ``reference`` as feed update ``index`` (bee-js format)."""
-        payload = int(time.time()).to_bytes(8, "big") + bytes.fromhex(reference)
+    ) -> int:
+        """Publish ``reference`` as feed update ``index`` (bee-js format);
+        returns the timestamp written into the payload."""
+        timestamp = int(time.time())
+        payload = timestamp.to_bytes(8, "big") + bytes.fromhex(reference)
         data = cac_data(payload)
         identifier = feed_identifier(topic, index)
         digest = keccak256(identifier + chunk_address(data))
@@ -198,3 +257,4 @@ class FeedOps:
         await self.client.soc_post(
             signer.owner_hex, identifier.hex(), signature.hex(), data, stamp
         )
+        return timestamp
