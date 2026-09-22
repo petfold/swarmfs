@@ -45,10 +45,54 @@ class StagedWrite:
 
 
 @dataclass
+class StagedLink:
+    """One staged manifest entry pointing at content that is *already* on
+    Swarm.
+
+    The reference was produced elsewhere — ``fs.put_blob`` in a worker
+    process, an earlier upload, another manifest — so the commit engine has
+    nothing to upload for it: the entry goes straight into the trie patch.
+    This is what makes cross-process writes compose (docs/distributed-writes.md):
+    a Mantaray entry is a reference and does not care who uploaded the data,
+    or with which batch.
+
+    ``size`` is advisory — it lets ``info()`` answer before the content is
+    ever read; None means "ask the node" (the span in the root chunk), like
+    any other entry.
+    """
+
+    reference: str
+    size: int | None = None
+    metadata: dict[str, str] | None = None
+
+    def close(self) -> None:
+        """Nothing to release: a link owns no spool."""
+
+
+Staged = StagedWrite | StagedLink
+
+
+def check_link_refsize(reference: str, encrypt: bool, path: str = "") -> None:
+    """A manifest node carries ONE refBytesSize, so a linked reference must
+    be the lineage's width: 64 hex plain, 128 hex encrypted."""
+    if len(reference) == (128 if encrypt else 64):
+        return
+    kind = "encrypted" if len(reference) == 128 else "plain"
+    raise ValueError(
+        "cannot link%s: a %d-hex (%s) reference cannot go into %s lineage — "
+        "a manifest node carries one refBytesSize, so a lineage cannot mix"
+        % (f" {path}" if path else "", len(reference), kind,
+           "an encrypted" if encrypt else "a plain")
+    )
+
+
+@dataclass
 class CommitResult:
     old_root: str | None
     new_root: str
-    written: dict[str, str] = field(default_factory=dict)  # path -> data reference
+    # path -> data reference; linked entries appear here unchanged, so the
+    # log tells the truth about where each entry came from
+    written: dict[str, str] = field(default_factory=dict)
     removed: list[str] = field(default_factory=list)
     batch: str = ""  # the postage batch the commit used
     # ACT: the history that unlocks new_root (None for an unprotected
@@ -85,7 +129,7 @@ class CommitEngine:
     async def commit(
         self,
         root: str | None,
-        writes: dict[str, StagedWrite],
+        writes: dict[str, Staged],
         removes: Iterable[str],
         stamp: str | None = None,
         act_history: str | None = None,
@@ -109,11 +153,16 @@ class CommitEngine:
                 "lineage cannot mix; publish a fresh manifest instead"
                 % (self.encrypt, root[:8],
                    "" if len(root) == 128 else "un"))
+        for path, sw in writes.items():
+            if isinstance(sw, StagedLink):
+                check_link_refsize(sw.reference, self.encrypt, path)
         batch = await self.stamps.resolve(stamp)
 
         sem = asyncio.Semaphore(self.concurrency)
 
-        async def upload(path: str, sw: StagedWrite) -> tuple[str, str]:
+        async def upload(path: str, sw: Staged) -> tuple[str, str]:
+            if isinstance(sw, StagedLink):
+                return path, sw.reference  # already on Swarm: nothing to do
             async with sem:
                 ref = await self.client.bytes_post(
                     sw.payload(), batch, pin=self.pin,
@@ -196,7 +245,11 @@ class LocalFirstCommitEngine(CommitEngine):
     foreign lineage (a manifest that was never local, e.g. opening
     ``bzz://<remote-ref>`` and writing into it) fall back to the node
     transiently — deliberately not persisted, so foreign parents don't
-    accumulate as forever-pinned orphans.
+    accumulate as forever-pinned orphans. A ``StagedLink`` is foreign by
+    the same rule: its bytes were uploaded by whoever produced the
+    reference, who owns their network residency, so the link is neither
+    stored nor journaled with the root (a local-first *producer* of such a
+    reference must ``fs.sync()`` before handing it over).
 
     Erasure coding must stay off for this store's uploads (parity forks
     the address space — the push's ref-equality assertion would trip), so
@@ -215,7 +268,7 @@ class LocalFirstCommitEngine(CommitEngine):
     async def commit(
         self,
         root: str | None,
-        writes: dict[str, StagedWrite],
+        writes: dict[str, Staged],
         removes: Iterable[str],
         stamp: str | None = None,  # unused: postage belongs to the push
     ) -> CommitResult:
@@ -228,7 +281,11 @@ class LocalFirstCommitEngine(CommitEngine):
             async with sem:
                 return await asyncio.to_thread(self.local.put, data)
 
-        async def upload(path: str, sw: StagedWrite) -> tuple[str, str]:
+        async def upload(path: str, sw: Staged) -> tuple[str, str]:
+            if isinstance(sw, StagedLink):
+                # foreign: not stored, not journaled, not pushed
+                check_link_refsize(sw.reference, False, path)
+                return path, sw.reference
             return path, await put_local(sw.payload())
 
         uploaded = dict(
@@ -267,7 +324,9 @@ class LocalFirstCommitEngine(CommitEngine):
         if new_root != root and not self.local.has_root(new_root):
             parent = root if (root is not None
                               and self.local.has_root(root)) else None
-            blobs = set(uploaded.values()) | set(node_refs)
+            blobs = {ref for path, ref in uploaded.items()
+                     if not isinstance(writes[path], StagedLink)}
+            blobs |= set(node_refs)
             await asyncio.to_thread(
                 self.local.commit_root, new_root, parent, sorted(blobs),
                 sorted(set(node_refs)))

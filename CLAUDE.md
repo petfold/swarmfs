@@ -413,13 +413,33 @@ makes Parquet predicate pushdown and zarr chunk reads viable.
 - **Listings stay in feed coordinates** (`<owner>/<topic>/…`), preserving the stable-URL
   illusion instead of leaking resolved root hashes.
 
-## Distributed writes (planned 2026-09-22; design in docs/distributed-writes.md)
+## Distributed writes (primitives implemented 2026-09-22; design in
+docs/distributed-writes.md)
 
 - **Cross-process writes compose through references, not through shared
   staging.** Workers `put_blob` → reference; the driver `link`s references
   into one lineage and commits once. `StagedLink` sits beside `StagedWrite`;
   the commit engine uploads writes and passes links through. Same lineage,
   transaction, refBytesSize and ACT rules as written files.
+- **`put_blob` takes no `content_type`** (the design said it would).
+  `POST /bytes` stores raw chunks; Swarm keeps no metadata for them —
+  `Content-Type`/`Filename` are *manifest* metadata, so they are set when
+  the reference is linked (guessed from the path, or `metadata=`). It is
+  refused on an ACT instance: a bare blob is not a root to wrap, and such
+  an instance treats every root as protected, so a plain reference read
+  back through it would 404.
+- **Everything about a link fails at staging, before any upload.** A
+  refBytesSize mismatch, an unparseable reference, a bzzf lineage without
+  a matching signer — all raise from `fs.link` itself (the signer check
+  falls out of `SwarmFeedFileSystem._stage_write`, unchanged). The one
+  thing `link` deliberately does *not* check is that the reference
+  resolves: that would cost a round trip and would be wrong anyway while
+  a local-first worker is still syncing.
+- **An encrypted lineage needs encrypted blobs.** `encrypt=True` makes
+  every reference 128-hex, so the *workers* must carry the same policy;
+  a 64-hex blob linked into it is refused with the "a lineage cannot mix"
+  error. The same is true in reverse. Worth saying out loud because the
+  worker and the driver are configured separately.
 - **Linked references are foreign** under `local_store=` (not persisted,
   not pushed) — the uploader owns its blob's network residency, so a
   local-first worker must `sync()` before its reference is linked. The

@@ -80,6 +80,8 @@ Methods beyond the fsspec standard surface:
 |---|---|---|
 | `SwarmFileSystem.upload` | `(lpath, rpath=None, content_type=None, encrypt=False, redundancy=None)` | one-liner: upload a file or directory, return the new reference. |
 | `SwarmFileSystem.download` | `(rpath, lpath, **kwargs)` | alias of `get`. |
+| `SwarmFileSystem.put_blob` | `(data, stamp=None)` | upload one payload → its bare **data reference**: no manifest, no lineage, no staging (the worker half of a distributed write). `pin`/`redundancy`/`encrypt` policy applies; always immediate; refused on an ACT instance. No `content_type` — that is manifest metadata, set when the reference is linked. |
+| `SwarmFileSystem.link` | `(path, reference, size=None, metadata=None)` | stage a manifest entry pointing at an existing reference (the driver half): same lineage, transaction and metadata rules as a written file, but the commit has nothing to upload for it. `size` is advisory (else read from the node); the reference must match the lineage's refBytesSize (64 hex plain, 128 encrypted) and is not fetched here. |
 | `SwarmFileSystem.latest` | `(ref)` | the current head of `ref`'s lineage (read-your-writes). |
 | `SwarmFileSystem.sync` | `(timeout=None)` | local-first barrier: block until every commit is network-confirmed. |
 | `SwarmFileSystem.sync_status` | `()` | the local store's `StoreStatus`. |

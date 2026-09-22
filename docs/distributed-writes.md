@@ -37,13 +37,21 @@ Three facts make the fix small:
 
 ## 2. Primitives (filesystem tier)
 
-### 2.1 `fs.put_blob(data, *, content_type=None, stamp=None) -> str`
+### 2.1 `fs.put_blob(data, stamp=None) -> str`
+
+*Implemented 2026-09-22.*
 
 Upload one payload and return its data reference. `POST /bytes` through
 `SwarmClient.bytes_post` with the instance's `pin`/`redundancy`/`encrypt`
 policy; `StampManager` resolves the batch first (fail early, as everywhere).
 No manifest, no lineage, no staging. `data` is `bytes` or a binary
-file-like (spooled like `_put_file`). This is the worker-side call.
+file-like. This is the worker-side call.
+
+**No `content_type`** (this design originally had one): `POST /bytes`
+stores raw chunks and Swarm keeps no metadata for a bare data reference —
+`Content-Type` and `Filename` are *manifest* metadata, emitted on the
+fork when the reference is linked. A parameter here would have been a
+no-op.
 
 Under `local_store=` it lands in the store and is journaled as a root of
 its own (a one-blob root), so the usual push/confirm ladder applies and
@@ -54,6 +62,8 @@ Iceberg-style consumer protects the *manifest* root, not blobs). Encrypted
 instances return 128-hex references, as `upload` does.
 
 ### 2.2 `fs.link(path, reference, *, size=None, metadata=None)`
+
+*Implemented 2026-09-22.*
 
 Stage a manifest entry that points at an existing reference. Same staging
 table as `pipe_file`, same lineage rules (`bzz://new/…`, existing roots,
@@ -79,6 +89,12 @@ there unchanged, so `fs.commit_log` tells the truth about where each entry
 came from.
 
 ### 2.3 Commit is unchanged
+
+*Implemented 2026-09-22 — and it really was unchanged: the engine's upload
+step returns a link's reference instead of uploading, and the local-first
+engine leaves links out of the journaled blob list. Everything else (the
+trie patch, the lineage lock, `_after_commit`'s feed publish) applies to a
+link exactly as to a write.*
 
 `with fs.transaction: fs.link(...); fs.link(...)` → one root. Nothing new to
 learn; `fs.latest("new")` returns it, bzzf publishes it. That is the whole
@@ -239,11 +255,11 @@ precedent entry to copy.
 
 ## 10. Order of work
 
-1. §2 primitives + tests (offline against the fake node: links appear in
-   the trie with the right entry, `info()` sizes, encrypted/plain refusal,
-   local-first foreign rule; live: a worker-style `put_blob` from a second
-   process then `link`+commit from the first). Small, self-contained,
-   unblocks brash.
+1. ~~§2 primitives + tests~~ **done 2026-09-22** — `tests/test_distributed.py`
+   (two `FakeClient`s over one store are two processes on one swarm) plus
+   `test_engine_link_is_foreign` / `test_put_blob_journals_a_one_blob_root`
+   in `tests/test_localfirst_fs.py`. The live worker-style round trip
+   (two real processes, one node) is still owed.
 2. §7 `at_root`/`at` + bzzf `modified()`. Also small; unblocks brash reads.
 3. §3 `swarmfs.dask` helper with the §4/§5 rules, and the User Guide's
    honest paragraph about the generic path.

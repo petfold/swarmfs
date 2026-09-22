@@ -424,12 +424,26 @@ nothing evicts against a dying batch.
 
 Design: `docs/distributed-writes.md`. First consumer: `brash` (Iceberg on Swarm).
 
-- [ ] `fs.put_blob(data) -> reference` — bare data upload through
-      `bytes_post`, stamp resolved first; the worker-side primitive.
-- [ ] `fs.link(path, reference, size=, metadata=)` — stage a manifest entry
+- [x] `fs.put_blob(data) -> reference` — bare data upload through
+      `bytes_post`, stamp resolved first; the worker-side primitive
+      (2026-09-22). One deviation from the design: **no `content_type`**
+      — `POST /bytes` stores raw chunks and Swarm keeps no metadata for
+      them, so content type is manifest metadata and belongs to the link.
+      Refused on an ACT instance (a bare blob is not a root to wrap, and
+      a plain reference read back through such an instance 404s). Under
+      `local_store` the blob is journaled as a root of its own, so it
+      rides the usual push/confirm ladder and `fs.sync()` is the barrier
+      before the reference is handed on.
+- [x] `fs.link(path, reference, size=, metadata=)` — stage a manifest entry
       pointing at an existing reference (`StagedLink`); commit skips its
       upload. Lineage/refBytesSize rules as for writes; foreign under
-      `local_store`.
+      `local_store` (2026-09-22). Refused at *staging* time — before
+      anything uploads — on a refBytesSize mismatch, an unparseable
+      reference, or (bzzf) a missing/mismatched feed signer. The
+      reference is deliberately not fetched: linking costs no round trip
+      and does not prove retrievability yet. Tests:
+      `tests/test_distributed.py` (incl. the two-process shape), plus the
+      local-first pair in `tests/test_localfirst_fs.py`.
 - [ ] `swarmfs.dask.to_parquet(ddf, url)` — partitions uploaded on workers,
       one manifest on the driver, one bzzf publish. Returns root + the
       (node, batch) pairs used. Local-first workers `sync()` before

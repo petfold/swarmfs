@@ -35,7 +35,8 @@ from fsspec.utils import stringify_path
 from ._client import DEFAULT_API_URL, SwarmClient, SyncSwarmClient
 from .act import Act, ActManager, ActReader, ActUpload
 from ._listing import ListingBackend, detect_listing_backend
-from .commit import CommitEngine, CommitResult, StagedWrite
+from .commit import (CommitEngine, CommitResult, Staged, StagedLink,
+                     StagedWrite, check_link_refsize)
 from .stamps import StampManager
 
 
@@ -47,6 +48,23 @@ def _validate_ref(ref: str) -> None:
             "ENS names are not supported yet. To upload new content and get "
             "its reference back, use fs.upload(local_path)."
         )
+
+
+def _link_reference(reference: str) -> str:
+    """Normalize and validate a reference handed to ``fs.link``."""
+    ref = stringify_path(reference).strip().lower().removeprefix("0x")
+    if len(ref) not in (64, 128) or any(c not in "0123456789abcdef" for c in ref):
+        raise ValueError(
+            f"invalid swarm reference {reference!r} to link: expected 64 hex "
+            "chars (or 128 for an encrypted reference) — the value "
+            "fs.put_blob() and SwarmClient.bytes_post() return."
+        )
+    return ref
+
+
+def _read_all(data) -> bytes:
+    data.seek(0)
+    return data.read()
 
 
 class SwarmTransaction(Transaction):
@@ -321,7 +339,7 @@ class SwarmFileSystem(AsyncFileSystem):
                 act_publisher=act_publisher,
             )
         # staging, keyed by the *origin* root of each manifest lineage
-        self._staged: dict[str, dict[str, StagedWrite]] = {}
+        self._staged: dict[str, dict[str, Staged]] = {}
         self._staged_rm: dict[str, set[str]] = {}
         self._root_map: dict[str, str] = {}  # committed root -> its successor
         self._origin: dict[str, str] = {}  # any root in a lineage -> origin
@@ -476,7 +494,7 @@ class SwarmFileSystem(AsyncFileSystem):
         two patches within one second."""
         return sync(self.loop, self._patch_grantees, reference, history, add, revoke)
 
-    def _overlay(self, ref: str) -> tuple[dict[str, StagedWrite], set[str]]:
+    def _overlay(self, ref: str) -> tuple[dict[str, Staged], set[str]]:
         okey = self._origin_of(ref)
         return self._staged.get(okey, {}), self._staged_rm.get(okey, set())
 
@@ -633,7 +651,25 @@ class SwarmFileSystem(AsyncFileSystem):
         ct = content_type or mimetypes.guess_type(sub)[0] or "application/octet-stream"
         return {"Content-Type": ct, "Filename": posixpath.basename(sub)}
 
-    def _stage_write(self, ref: str, sub: str, sw: StagedWrite) -> None:
+    @staticmethod
+    def _staged_info(name: str, sw: Staged) -> dict:
+        """The ``info``/``ls`` view of a staged entry. A link carries its
+        reference (so sizes can be filled from the node and reads go
+        straight to it); a write carries its buffered size."""
+        meta = sw.metadata or {}
+        out = {
+            "name": name,
+            "type": "file",
+            "size": sw.size,
+            "staged": True,
+            "mimetype": meta.get("Content-Type"),
+            "metadata": meta,
+        }
+        if isinstance(sw, StagedLink):
+            out["reference"] = sw.reference
+        return out
+
+    def _stage_write(self, ref: str, sub: str, sw: Staged) -> None:
         okey = self._origin_of(ref)
         self._staged.setdefault(okey, {})[sub] = sw
         self._staged_rm.get(okey, set()).discard(sub)
@@ -651,7 +687,7 @@ class SwarmFileSystem(AsyncFileSystem):
         self._staged_rm.get(okey, set()).discard(sub)
         self.invalidate_cache()
 
-    async def _stage_path(self, path: str, sw: StagedWrite, commit: bool) -> None:
+    async def _stage_path(self, path: str, sw: Staged, commit: bool) -> None:
         """Resolve, stage, optionally commit — used by SwarmFile writes,
         where resolution must happen lazily (feeds resolve asynchronously)."""
         ref, sub = await self._resolve_path(path)
@@ -737,16 +773,11 @@ class SwarmFileSystem(AsyncFileSystem):
                     raise FileNotFoundError(path)
             return {"name": path, "type": "directory", "size": 0}
         if sub in staged:
-            sw = staged[sub]
-            meta = sw.metadata or {}
-            return {
-                "name": path,
-                "type": "file",
-                "size": sw.size,
-                "staged": True,
-                "mimetype": meta.get("Content-Type"),
-                "metadata": meta,
-            }
+            out = self._staged_info(path, staged[sub])
+            if out["size"] is None:
+                # a link without an advisory size: ask the node for the span
+                await self._fill_sizes([out])
+            return out
         if any(s.startswith(sub + "/") for s in staged):
             return {"name": path, "type": "directory", "size": 0}
         if sub in removed or self._is_pseudo(ref):
@@ -835,16 +866,8 @@ class SwarmFileSystem(AsyncFileSystem):
                         f"{base}{d}", {"name": f"{base}{d}", "type": "directory", "size": 0}
                     )
                 else:
-                    sw = staged[s]
-                    meta = sw.metadata or {}
-                    by_name[f"{base}{rel}"] = {
-                        "name": f"{base}{rel}",
-                        "type": "file",
-                        "size": sw.size,
-                        "staged": True,
-                        "mimetype": meta.get("Content-Type"),
-                        "metadata": meta,
-                    }
+                    by_name[f"{base}{rel}"] = self._staged_info(
+                        f"{base}{rel}", staged[s])
             for r in removed:
                 if (not prefix or r.startswith(prefix)) and "/" not in r[len(prefix) :]:
                     by_name.pop(f"{base}{r[len(prefix):]}", None)
@@ -905,16 +928,8 @@ class SwarmFileSystem(AsyncFileSystem):
             rel = s[len(prefix) :] if prefix else s
             if not rel or not depth_ok(rel):
                 continue
-            meta = sw.metadata or {}
             name = base + rel if rel != sub or prefix else path
-            out[name] = {
-                "name": name,
-                "type": "file",
-                "size": sw.size,
-                "staged": True,
-                "mimetype": meta.get("Content-Type"),
-                "metadata": meta,
-            }
+            out[name] = self._staged_info(name, sw)
         for r in removed:
             if not prefix or r.startswith(prefix):
                 out.pop(base + (r[len(prefix) :] if prefix else r), None)
@@ -941,7 +956,12 @@ class SwarmFileSystem(AsyncFileSystem):
         ref, sub = await self._resolve_path(path)
         staged, removed = self._overlay(ref)
         if sub in staged:
-            data = staged[sub].payload()
+            sw = staged[sub]
+            if isinstance(sw, StagedLink):
+                # nothing buffered locally: the content is already on Swarm
+                return await (await self._get_reader()).bytes_get(
+                    sw.reference, start, end)
+            data = sw.payload()
             return data[start or 0 : end if end is not None else len(data)]
         if sub in removed:
             raise FileNotFoundError(path)
@@ -1048,6 +1068,108 @@ class SwarmFileSystem(AsyncFileSystem):
 
     async def _makedirs(self, path, exist_ok=False):
         pass
+
+    # ------------------------------------------- distributed writes
+
+    async def _put_blob(self, data, stamp: str | None = None) -> str:
+        await self._setup()
+        if self.act_mode:
+            raise ValueError(
+                "put_blob is not available on an ACT instance: a bare blob is "
+                "not a root to wrap, and this instance treats every root "
+                "reference as protected — a plain reference read back through "
+                "it would 404. Protect the manifest root instead (the commit "
+                "wraps it) and link plain references into it."
+            )
+        if self._local is not None:
+            payload = data if isinstance(data, bytes) else _read_all(data)
+            ref = await asyncio.to_thread(self._local.put, payload)
+            if not self._local.has_root(ref):
+                # a root of its own (one blob): the usual push/confirm ladder
+                # then applies, and fs.sync() is the barrier before the
+                # reference is handed to whoever will link it
+                try:
+                    await asyncio.to_thread(
+                        self._local.commit_root, ref, None, [ref])
+                except ValueError:
+                    # identical content is the same reference: another
+                    # put_blob of these bytes journaled it while we waited
+                    if not self._local.has_root(ref):
+                        raise
+            return ref
+        if not isinstance(data, bytes):
+            data.seek(0)
+        batch = await self._engine.stamps.resolve(stamp or self.stamp)
+        return await self.client.bytes_post(
+            data, batch, pin=self.pin, redundancy=self.redundancy,
+            encrypt=self.encrypt,
+        )
+
+    def put_blob(self, data, stamp: str | None = None) -> str:
+        """Upload one payload and return its **data reference** — no
+        manifest, no lineage, no staging.
+
+        The worker-side half of a distributed write
+        (docs/distributed-writes.md): each process uploads its own blobs
+        through its own node, hands the references to whichever process
+        owns the manifest, and that one ``link``s them into a single
+        commit. One ``POST /bytes``; the stamp is resolved first (fail
+        early), and the instance's ``pin``/``redundancy``/``encrypt``
+        policy applies — an ``encrypt=True`` instance returns a 128-hex
+        reference, as ``upload`` does.
+
+        ``data`` is bytes or a binary file-like object. Always immediate:
+        transactions do not defer it (there is nothing to commit).
+
+        There is no ``content_type`` here — ``POST /bytes`` stores raw
+        chunks and Swarm keeps no metadata for them. Content type and
+        filename are *manifest* metadata: they are set when the reference
+        is linked (guessed from the path, or passed as ``metadata=``).
+
+        In local-first mode the blob lands in the local store and is
+        journaled as a root of its own, so it is pushed and confirmed like
+        any commit — call ``fs.sync()`` before handing the reference on,
+        or the manifest that links it will name content the network does
+        not yet hold.
+        """
+        return sync(self.loop, self._put_blob, data, stamp)
+
+    async def _link(self, path, reference, size=None, metadata=None) -> None:
+        path = self._strip_protocol(path)
+        ref, sub = await self._resolve_path(path)
+        if not sub:
+            raise IsADirectoryError("cannot link the manifest root; give a file path")
+        reference = _link_reference(reference)
+        check_link_refsize(reference, self.encrypt, sub)
+        self._stage_write(ref, sub, StagedLink(
+            reference, size, self._guess_metadata(sub, None, metadata)))
+        if not self._intrans:
+            await self._commit_root(ref)
+
+    def link(self, path, reference: str, *, size: int | None = None,
+             metadata: dict[str, str] | None = None) -> None:
+        """Stage a manifest entry at ``path`` pointing at an existing
+        ``reference`` — the driver-side half of a distributed write.
+
+        Staging, lineage and transaction rules are exactly those of a
+        written file: ``bzz://new/…`` starts a fresh manifest, an existing
+        root extends that lineage, ``bzzf://`` advances the feed, and
+        ``with fs.transaction:`` collects any number of links into one
+        commit. The commit has nothing to upload for a link — the content
+        is already on Swarm — so it only patches the trie.
+
+        ``size`` is advisory: it lets ``info()``/``ls()`` answer before the
+        content is ever read; without it the size is read from the node
+        like any other entry. ``metadata`` defaults to the same bee-style
+        ``Content-Type``/``Filename`` a written file gets, guessed from
+        ``path``.
+
+        The reference is **not** fetched here: linking costs no round trip
+        and deliberately does not prove the content is retrievable yet
+        (the uploader may still be syncing). Whoever produced the
+        reference owns its residency on the network.
+        """
+        return sync(self.loop, self._link, path, reference, size, metadata)
 
     # --------------------------------------------- one-shot upload / download
 

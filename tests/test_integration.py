@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
+import sys
 import tarfile
+import textwrap
 import time
 import urllib.request
 
@@ -344,6 +347,60 @@ def test_dask_partitioned_parquet_live(fs):
     ddf = dd.read_parquet(f"bzz://{root}/dataset", storage_options={"api_url": BEE})
     out = ddf.compute().sort_values("id").reset_index(drop=True)
     pd.testing.assert_frame_equal(out[["id", "part"]], expected[["id", "part"]])
+
+
+@pytest.mark.skipif(not STAMP, reason="uploading needs SWARMFS_TEST_STAMP")
+def test_distributed_write_live(fs):
+    """Two processes, one manifest (docs/distributed-writes.md §2).
+
+    A separate *process* uploads the partitions with ``put_blob`` and
+    prints their references; this one ``link``s them into a single commit.
+    Nothing crosses the boundary but 64-hex strings — no shared staging,
+    no shared filesystem object — and a third instance that saw none of it
+    reads the finished dataset back with dask.
+    """
+    pd = pytest.importorskip("pandas")
+    dd = pytest.importorskip("dask.dataframe")
+    pytest.importorskip("pyarrow")
+
+    frames = [pd.DataFrame({"id": range(i * 100, (i + 1) * 100), "part": i})
+              for i in range(3)]
+    expected = pd.concat(frames, ignore_index=True)
+
+    worker = textwrap.dedent("""
+        import io, sys
+        import pandas as pd
+        from swarmfs import SwarmFileSystem
+
+        fs = SwarmFileSystem(api_url=sys.argv[1], stamp=sys.argv[2])
+        for i in range(3):
+            buf = io.BytesIO()
+            pd.DataFrame({"id": range(i * 100, (i + 1) * 100),
+                          "part": i}).to_parquet(buf)
+            print(fs.put_blob(buf.getvalue()))
+    """)
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, PYTHONPATH=repo + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    out = subprocess.run([sys.executable, "-c", worker, BEE, STAMP],
+                         capture_output=True, text=True, env=env, timeout=300)
+    assert out.returncode == 0, out.stderr
+    refs = out.stdout.split()
+    assert len(refs) == 3 and all(len(r) == 64 for r in refs), out.stdout
+
+    from swarmfs import SwarmFileSystem
+
+    driver = SwarmFileSystem(api_url=BEE, stamp=STAMP, skip_instance_cache=True)
+    with driver.transaction:
+        for i, ref in enumerate(refs):
+            driver.link(f"bzz://new/dataset/part.{i}.parquet", ref)
+    root = driver.latest("new")
+    assert len(driver.commit_log) == 1          # one commit for the dataset
+    res = driver.commit_log[0]
+    assert list(res.written.values()) == refs   # the workers' own references
+
+    ddf = dd.read_parquet(f"bzz://{root}/dataset", storage_options={"api_url": BEE})
+    got = ddf.compute().sort_values("id").reset_index(drop=True)
+    pd.testing.assert_frame_equal(got[["id", "part"]], expected[["id", "part"]])
 
 
 @pytest.mark.skipif(not STAMP, reason="uploading needs SWARMFS_TEST_STAMP")

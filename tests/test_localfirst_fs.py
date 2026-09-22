@@ -16,7 +16,8 @@ pytest.importorskip("eth_hash")
 
 from conftest import GOOD_STAMP, FakeClient  # noqa: E402
 
-from swarmfs.commit import LocalFirstCommitEngine, StagedWrite  # noqa: E402
+from swarmfs.commit import (LocalFirstCommitEngine, StagedLink,  # noqa: E402
+                            StagedWrite)
 from swarmfs.core import SwarmFileSystem  # noqa: E402
 from swarmfs.localstore import CONFIRMED, LocalStore  # noqa: E402
 from swarmfs.mantaray import unmarshal  # noqa: E402
@@ -132,6 +133,28 @@ def test_engine_patches_foreign_lineage_via_fallback(tmp_path):
         local.close()
 
 
+def test_engine_link_is_foreign(tmp_path):
+    """A linked reference belongs to whoever uploaded it: the commit puts it
+    in the manifest but neither stores nor journals it, so the local store
+    never pins — or pushes — someone else's blob."""
+    local = LocalStore(str(tmp_path / "store"))
+    try:
+        engine = LocalFirstCommitEngine(local, client=OfflineClient())
+        foreign = content_address(b"a worker's payload").hex()
+        res = asyncio.run(engine.commit(
+            None,
+            {"mine.txt": staged(b"my bytes"),
+             "theirs.bin": StagedLink(foreign, 18)},
+            []))
+        state = dict(local.roots_below(CONFIRMED))[res.new_root]
+        assert foreign not in state.blobs             # not journaled
+        assert not local.has_local(foreign)           # not stored
+        assert res.written["theirs.bin"] == foreign   # but it IS the entry
+        assert res.written["mine.txt"] in state.blobs
+    finally:
+        local.close()
+
+
 def test_engine_refuses_wrong_addressing(tmp_path):
     local = LocalStore(str(tmp_path / "s"), addressing="sha256")
     try:
@@ -166,6 +189,27 @@ def test_fs_writes_commit_offline_then_sync(tmp_path):
     assert all(r == CONFIRMED for r in st.roots.values())
     assert bytes.fromhex(root) in store              # the root reached "Swarm"
     assert fs.cat(f"bzz://{root}/a.txt") == b"alpha"  # readable via the node
+
+
+def test_put_blob_journals_a_one_blob_root(tmp_path):
+    """The worker side, local-first: the blob rides the usual ladder as a
+    root of its own, so fs.sync() is the barrier before the reference is
+    handed to whoever will link it."""
+    store = {}
+    fs = SwarmFileSystem(client=BMTFakeClient(store),
+                         local_store=str(tmp_path / "s"),
+                         redundancy=0, skip_instance_cache=True)
+    ref = fs.put_blob(b"worker partition")
+    assert fs._local.has_root(ref)
+    assert fs._local.get(ref) == b"worker partition"
+    fs.sync(timeout=WAIT)
+    assert bytes.fromhex(ref) in store               # the network really has it
+
+    assert fs.put_blob(b"worker partition") == ref    # content-addressed: free
+
+    fs.link("bzz://new/ds/part.0.bin", ref)          # then link it like any ref
+    root = fs.latest("new")
+    assert fs.cat_file(f"bzz://{root}/ds/part.0.bin") == b"worker partition"
 
 
 def test_bzzf_feed_publishes_only_after_confirmation(tmp_path):
