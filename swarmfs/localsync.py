@@ -63,6 +63,14 @@ from .localstore import (
 from .stamps import StampManager
 
 
+#: The smallest sample `confirm_sample` takes of a root's blobs. A lost
+#: blob slips past a sample of k with probability (1 - p)**k when a
+#: fraction p of the root was lost; at the shallow-receipt rate seen twice
+#: on a light node (about one in ten) that is 90% for one blob and 19% for
+#: sixteen. A root this small or smaller is checked whole.
+MIN_CONFIRM_SAMPLE = 16
+
+
 @dataclass
 class SyncPolicy:
     """When the worker pushes, and how confirmation verifies.
@@ -72,8 +80,9 @@ class SyncPolicy:
     exists on one disk, `pinned_bytes_limit` bounds the size of a possible
     loss and relieves the budget (None: a quarter of the store's budget
     when one is set, else disabled). `confirm_sample` is the fraction of a
-    root's blobs retrieve-and-verified before it is confirmed (at least
-    one when > 0); 0 trusts the node's stewardship claim alone — a
+    root's blobs retrieve-and-verified before it is confirmed (when > 0,
+    never fewer than `MIN_CONFIRM_SAMPLE` blobs, or the whole root if it
+    is smaller); 0 trusts the node's stewardship claim alone — a
     deliberate weakening, reported by `Syncer.trusting_node_claims`.
     """
     debounce: float = 10.0
@@ -346,5 +355,6 @@ class Syncer:
         frac = self.policy.confirm_sample
         if not blobs or frac <= 0:
             return []
-        k = min(len(blobs), max(1, math.ceil(frac * len(blobs))))
+        k = min(len(blobs), max(MIN_CONFIRM_SAMPLE,
+                                math.ceil(frac * len(blobs))))
         return random.sample(blobs, k)

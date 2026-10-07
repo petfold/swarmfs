@@ -24,6 +24,11 @@ claiming more detail than the history holds.
   missing one is pushed again directly (not deferred) from the local
   copy, which stays pinned until confirmation, and the next round checks
   again. Only missing blobs are resent; `Syncer.repaired` counts them.
+- **A small root is checked whole.** The confirmation sample was a
+  quarter of a root's blobs but at least one, so a commit of four blobs
+  checked one, and a lost blob slipped past three times in four. It now
+  takes at least `MIN_CONFIRM_SAMPLE` (16) blobs, or the whole root when
+  it is smaller.
 
 ### Added
 

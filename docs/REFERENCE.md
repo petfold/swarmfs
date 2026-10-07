@@ -188,6 +188,7 @@ expiry — the number to watch once local is partial).
 | `localsync.BeeRemote` | `(api_url=None, stamp="auto", client=None, min_batch_ttl=86400)` | the Swarm side. `"auto"` resolves lazily (offline construction works); `stamp=None` = read-only witness shape. |
 | `localsync.BeeRemote.push_blob` | `(ref, data, deferred=True)` | upload; **asserts the node returns the locally computed ref** (erasure-coding tripwire). |
 | `localsync.SyncPolicy` | dataclass | `debounce=10.0`, `max_staleness=300.0`, `pinned_bytes_limit=None` (→ budget/4), `confirm_sample=0.25`, `direct_upload=False`, `backoff_base=1.0`, `backoff_max=60.0`. |
+| `localsync.MIN_CONFIRM_SAMPLE` | `16` | the smallest sample `confirm_sample` takes of a root's blobs (a smaller root is checked whole); `confirm_sample=0` still turns sampling off. |
 
 Confirmation is p2p-native: Bee's stewardship check retrieves every chunk
 through the retrieval protocol from remote peers (verified from the Bee

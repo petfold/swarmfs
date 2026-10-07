@@ -236,6 +236,21 @@ def test_a_small_sample_still_repairs_the_whole_root(store):
         assert sorted(remote.direct) == sorted(refs)
 
 
+def test_a_small_root_is_checked_whole(store):
+    """A quarter of twelve blobs would be three; the sample never drops
+    below MIN_CONFIRM_SAMPLE, so one lost blob of a small root is found
+    every time, not one time in four."""
+    remote = FakeRemote()
+    datas = [bytes([i]) * 20 for i in range(12)]
+    refs = [store.address(d) for d in datas]
+    remote.lose = {refs[7]}
+    with Syncer(store, remote, fast_policy(confirm_sample=0.25)) as syncer:
+        root, _ = commit_blobs(store, *datas)
+        syncer.sync(timeout=WAIT)
+        assert store.network_confirmed(root)
+        assert remote.direct == [refs[7]]
+
+
 def test_sample_zero_trusts_node_claims(store):
     remote = FakeRemote()
     remote.corrupt["never-fetched"] = b"x"  # fetch would fail if sampled
