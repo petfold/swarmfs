@@ -134,7 +134,10 @@ No postage stamp is needed at commit time (the push owns postage), local
 disk becomes a budgeted working set (unpushed data is pinned; only
 Swarm-confirmed blobs evict, and evicted reads heal by verified re-fetch),
 and on `bzzf://` mounts the feed update publishes only once the network
-provably serves the new root. `redundancy=0` is required — erasure coding
+provably serves the new root. Confirmation does not trust the upload: a
+blob the network cannot serve afterwards (Bee can count a chunk delivered
+when it was not) is pushed again from the local copy until it can.
+`redundancy=0` is required — erasure coding
 would fork the node's references from the local address space. Full design:
 [docs/localstore-design.md](docs/localstore-design.md).
 
@@ -363,7 +366,7 @@ read.
 
 ```bash
 pip install -e ".[test]"
-pytest                                   # 464 tests; the live ones skip with no node (plus `pytest -m bench`)
+pytest                                   # 470 tests; the live ones skip with no node (plus `pytest -m bench`)
 SWARMFS_TEST_BEE=http://localhost:1633 \
 SWARMFS_TEST_STAMP=<batch-id> pytest tests/test_integration.py
 ```

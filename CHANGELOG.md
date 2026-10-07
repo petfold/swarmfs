@@ -12,6 +12,8 @@ claiming more detail than the history holds.
 
 ## [Unreleased]
 
+## [0.11.2] — 2026-10-08
+
 ### Fixed
 
 - **The sync worker repairs what the network lost instead of waiting for
@@ -29,11 +31,23 @@ claiming more detail than the history holds.
   checked one, and a lost blob slipped past three times in four. It now
   takes at least `MIN_CONFIRM_SAMPLE` (16) blobs, or the whole root when
   it is smaller.
+- **Confirmation checks run 32 at a time** (`SyncPolicy.check_concurrency`,
+  default `CHECK_CONCURRENCY`). They ran one at a time, and a stewardship
+  check takes about 1.2 s on a light node, so confirming a quarter of a
+  10,000-blob root took most of an hour: the reason every large publish
+  overran a 60 s sync wait, with or without lost blobs. Measured, not
+  guessed, against a Bee 2.8.2 light node: 0.9 checks/s one at a time,
+  12/s at 16, 20/s at 32, 23/s at 64, 26-33/s at 128 with each check then
+  waiting 3-4 s.
 
 ### Added
 
 - `docs/bee-issue-draft.md`: the issue for Bee, drafted after the second
   occurrence; and that occurrence's evidence in `bee-push-sync-evidence/`.
+- `scripts/concurrency_sweep.py`: how many requests to keep in flight
+  against *your* node, for reads of chunks it must fetch and for
+  stewardship checks. The best number depends on the node more than on
+  the machine (the client spends about 1 ms of CPU per request).
 
 ## [0.11.1] — 2026-09-11
 

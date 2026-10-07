@@ -12,6 +12,9 @@ fire immediately; assertions use generous wait_for timeouts, never sleeps.
 import hashlib
 import os
 
+import threading
+import time
+
 import pytest
 
 from swarmfs.localstore import (
@@ -249,6 +252,52 @@ def test_a_small_root_is_checked_whole(store):
         syncer.sync(timeout=WAIT)
         assert store.network_confirmed(root)
         assert remote.direct == [refs[7]]
+
+
+class _SlowRemote(FakeRemote):
+    """Each stewardship check takes a while; records how many overlap."""
+
+    def __init__(self, delay=0.05):
+        super().__init__()
+        self.delay, self.active, self.peak = delay, 0, 0
+        self._lock = threading.Lock()
+
+    def is_retrievable(self, ref):
+        with self._lock:
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+        time.sleep(self.delay)
+        with self._lock:
+            self.active -= 1
+        return super().is_retrievable(ref)
+
+
+@pytest.mark.parametrize("limit", [1, 8])
+def test_checks_overlap_up_to_the_limit(store, limit):
+    """Stewardship checks are mostly waiting, so they run
+    `check_concurrency` at a time; one at a time made confirming a large
+    root take most of an hour on a light node."""
+    remote = _SlowRemote()
+    datas = [bytes([i]) * 20 for i in range(40)]
+    policy = fast_policy(confirm_sample=1.0, check_concurrency=limit)
+    with Syncer(store, remote, policy) as syncer:
+        root, _ = commit_blobs(store, *datas)
+        syncer.sync(timeout=WAIT)
+        assert store.network_confirmed(root)
+    assert remote.peak == 1 if limit == 1 else 1 < remote.peak <= limit
+
+
+def test_concurrent_checks_still_repair_only_the_missing(store):
+    remote = _SlowRemote(delay=0.01)
+    datas = [bytes([i]) * 20 for i in range(30)]
+    refs = [store.address(d) for d in datas]
+    remote.lose = {refs[3], refs[17], refs[29]}
+    policy = fast_policy(confirm_sample=0.25, check_concurrency=8)
+    with Syncer(store, remote, policy) as syncer:
+        root, _ = commit_blobs(store, *datas)
+        syncer.sync(timeout=WAIT)
+        assert store.network_confirmed(root)
+    assert sorted(remote.direct) == sorted(remote.lose)
 
 
 def test_sample_zero_trusts_node_claims(store):

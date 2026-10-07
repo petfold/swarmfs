@@ -8,7 +8,7 @@ local-first design in [localstore-design.md](localstore-design.md) and its
 Tables here are pinned against the code by `tests/test_reference.py` — if a
 name or parameter in this file and the code disagree, the suite fails.
 
-Package version this file describes: `0.11.1`.
+Package version this file describes: `0.11.2`.
 
 ## 1. Vocabulary
 
@@ -182,12 +182,13 @@ expiry — the number to watch once local is partial).
 
 | member | signature | semantics |
 |---|---|---|
-| `localsync.Syncer` | `(store, remote, policy=None, witness=None)` | wires itself in (journal listener + the store's fetcher); `start()`/`stop()`; context manager. A blob the network cannot retrieve is repaired: when a sampled blob of a root is missing, every blob of that root is checked and each missing one is pushed again directly from the local copy (only missing blobs are resent; `docs/bee-push-sync-findings.md`); the instance's `repaired` maps each to how often. |
+| `localsync.Syncer` | `(store, remote, policy=None, witness=None)` | wires itself in (journal listener + the store's fetcher); `start()`/`stop()`; context manager. A blob the network cannot retrieve is repaired: when a sampled blob of a root is missing, every blob of that root is checked and each missing one is pushed again directly from the local copy (only missing blobs are resent; `docs/bee-push-sync-findings.md`); the instance's `repaired` maps each to how often. Checks run `policy.check_concurrency` at a time. |
 | `localsync.Syncer.sync` | `(timeout=None)` | block until everything is network-confirmed; `TimeoutError` names the last sync error. |
 | `localsync.Syncer.trusting_node_claims` | property | True when `confirm_sample == 0` — eviction safety rests on stewardship alone. |
 | `localsync.BeeRemote` | `(api_url=None, stamp="auto", client=None, min_batch_ttl=86400)` | the Swarm side. `"auto"` resolves lazily (offline construction works); `stamp=None` = read-only witness shape. |
 | `localsync.BeeRemote.push_blob` | `(ref, data, deferred=True)` | upload; **asserts the node returns the locally computed ref** (erasure-coding tripwire). |
-| `localsync.SyncPolicy` | dataclass | `debounce=10.0`, `max_staleness=300.0`, `pinned_bytes_limit=None` (→ budget/4), `confirm_sample=0.25`, `direct_upload=False`, `backoff_base=1.0`, `backoff_max=60.0`. |
+| `localsync.SyncPolicy` | dataclass | `debounce=10.0`, `max_staleness=300.0`, `pinned_bytes_limit=None` (→ budget/4), `confirm_sample=0.25`, `direct_upload=False`, `backoff_base=1.0`, `backoff_max=60.0`, `check_concurrency=32`. |
+| `localsync.CHECK_CONCURRENCY` | `32` | how many confirmation checks (retrieve-and-verify fetches, stewardship calls) run at once; each takes about a second on a light node, almost all of it waiting. Measured, not guessed: `scripts/concurrency_sweep.py` measures your node. |
 | `localsync.MIN_CONFIRM_SAMPLE` | `16` | the smallest sample `confirm_sample` takes of a root's blobs (a smaller root is checked whole); `confirm_sample=0` still turns sampling off. |
 
 Confirmation is p2p-native: Bee's stewardship check retrieves every chunk

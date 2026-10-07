@@ -47,6 +47,7 @@ import math
 import random
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional
 
@@ -70,6 +71,17 @@ from .stamps import StampManager
 #: sixteen. A root this small or smaller is checked whole.
 MIN_CONFIRM_SAMPLE = 16
 
+#: How many confirmation checks run at once (`SyncPolicy.check_concurrency`).
+#: Measured 2026-10-07 against a Bee 2.8.2 light node behind NAT with ~140
+#: peers: a stewardship check takes about 1.2 s, and throughput grows almost
+#: linearly to 16 at once (12 checks/s) and still well to 32 (20/s), then
+#: flattens (64: 23/s, 128: 26-33/s) while each check waits 2-4 s. Reads of
+#: chunks the node must fetch behave alike: about 4/s per request in flight
+#: up to 32. The best number depends on the node more than on the machine
+#: running this (about 1 ms of client CPU per request);
+#: `scripts/concurrency_sweep.py` measures it for yours.
+CHECK_CONCURRENCY = 32
+
 
 @dataclass
 class SyncPolicy:
@@ -84,6 +96,10 @@ class SyncPolicy:
     never fewer than `MIN_CONFIRM_SAMPLE` blobs, or the whole root if it
     is smaller); 0 trusts the node's stewardship claim alone — a
     deliberate weakening, reported by `Syncer.trusting_node_claims`.
+    `check_concurrency` is how many of those network checks (fetches and
+    stewardship calls) run at once: each takes up to a second on a light
+    node, almost all of it waiting, so one at a time made confirming a
+    large root take most of an hour.
     """
     debounce: float = 10.0
     max_staleness: float = 300.0
@@ -92,6 +108,7 @@ class SyncPolicy:
     direct_upload: bool = False
     backoff_base: float = 1.0
     backoff_max: float = 60.0
+    check_concurrency: int = CHECK_CONCURRENCY
 
 
 class BeeRemote:
@@ -321,15 +338,14 @@ class Syncer:
                 continue  # push failed mid-round; next round retries it
             sample = self._sample(state.blobs)
             fetch_via = self.witness or self.remote
-            for ref in sample:
-                data = fetch_via.fetch(ref)
-                if self.store.address(data) != ref:
-                    raise BlobVerificationFailed(
-                        f"retrieve-and-verify failed for {ref[:16]}… of "
-                        f"root {root[:8]}…: fetched bytes do not hash to "
-                        "the reference")
-            if any(not self.remote.is_retrievable(ref) for ref in sample):
+            self._each(lambda ref: self._verify(fetch_via, root, ref), sample)
+            retrievable = self._each(self.remote.is_retrievable, sample)
+            if self._stop.is_set():
+                return
+            if not all(retrievable):
                 self._repair(root, state.blobs)
+                if self._stop.is_set():
+                    return
             batch, ttl = self.remote.batch_info()
             self.store.mark_confirmed(root, batch=batch, ttl=ttl)
 
@@ -338,7 +354,10 @@ class Syncer:
         blob of the root, push each missing one again directly from the
         local copy (pinned until confirmed), and leave the root to be
         checked on a later round. Raises, so the worker backs off first."""
-        missing = [ref for ref in blobs if not self.remote.is_retrievable(ref)]
+        retrievable = self._each(self.remote.is_retrievable, blobs)
+        if self._stop.is_set():
+            return
+        missing = [ref for ref, ok in zip(blobs, retrievable) if not ok]
         if not missing:
             return                  # a passing blip: the whole root is there
         for ref in missing:
@@ -350,6 +369,28 @@ class Syncer:
             f"{len(missing)} of {len(blobs)} blobs of root {root[:8]}… were "
             "not retrievable from the network; pushed again directly, "
             "checking again later")
+
+    def _verify(self, fetch_via, root: str, ref: str) -> None:
+        data = fetch_via.fetch(ref)
+        if self.store.address(data) != ref:
+            raise BlobVerificationFailed(
+                f"retrieve-and-verify failed for {ref[:16]}… of "
+                f"root {root[:8]}…: fetched bytes do not hash to "
+                "the reference")
+
+    def _each(self, fn, refs: list) -> list:
+        """``fn(ref)`` for every ref, ``policy.check_concurrency`` at a
+        time, results in order (None where the worker was stopping). The
+        remote's calls block — SyncSwarmClient runs each on fsspec's event
+        loop — so threads are what overlap them. An exception in any call
+        is raised here, after the others finish."""
+        def guarded(ref):
+            return None if self._stop.is_set() else fn(ref)
+        workers = max(1, min(self.policy.check_concurrency, len(refs)))
+        if workers == 1:
+            return [guarded(ref) for ref in refs]
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(guarded, refs))
 
     def _sample(self, blobs: list) -> list:
         frac = self.policy.confirm_sample
