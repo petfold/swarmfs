@@ -182,7 +182,7 @@ expiry — the number to watch once local is partial).
 
 | member | signature | semantics |
 |---|---|---|
-| `localsync.Syncer` | `(store, remote, policy=None, witness=None)` | wires itself in (journal listener + the store's fetcher); `start()`/`stop()`; context manager. |
+| `localsync.Syncer` | `(store, remote, policy=None, witness=None)` | wires itself in (journal listener + the store's fetcher); `start()`/`stop()`; context manager. A blob the network cannot retrieve is repaired: when a sampled blob of a root is missing, every blob of that root is checked and each missing one is pushed again directly from the local copy (only missing blobs are resent; `docs/bee-push-sync-findings.md`); the instance's `repaired` maps each to how often. |
 | `localsync.Syncer.sync` | `(timeout=None)` | block until everything is network-confirmed; `TimeoutError` names the last sync error. |
 | `localsync.Syncer.trusting_node_claims` | property | True when `confirm_sample == 0` — eviction safety rests on stewardship alone. |
 | `localsync.BeeRemote` | `(api_url=None, stamp="auto", client=None, min_batch_ttl=86400)` | the Swarm side. `"auto"` resolves lazily (offline construction works); `stamp=None` = read-only witness shape. |

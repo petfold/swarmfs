@@ -10,6 +10,26 @@ original wording). Entries for versions whose notes were never written are
 summarised from their release commits, so they say what shipped without
 claiming more detail than the history holds.
 
+## [Unreleased]
+
+### Fixed
+
+- **The sync worker repairs what the network lost instead of waiting for
+  it.** Bee can count a chunk delivered on a "shallow receipt" and never
+  retry it (`docs/bee-push-sync-findings.md`: 2026-09-11, and again on
+  2026-10-07 with 36,589 of 372,313 pushes). The confirmation pass found
+  such a blob missing and then only checked again, forever, so the root
+  never confirmed and nothing re-sent it. Now, when a sampled blob of a
+  root is not retrievable, every blob of that root is checked, each
+  missing one is pushed again directly (not deferred) from the local
+  copy, which stays pinned until confirmation, and the next round checks
+  again. Only missing blobs are resent; `Syncer.repaired` counts them.
+
+### Added
+
+- `docs/bee-issue-draft.md`: the issue for Bee, drafted after the second
+  occurrence; and that occurrence's evidence in `bee-push-sync-evidence/`.
+
 ## [0.11.1] — 2026-09-11
 
 ### Fixed

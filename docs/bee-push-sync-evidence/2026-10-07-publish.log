@@ -1,0 +1,14 @@
+core: root 7829cd76ef43… golden=yes synced=TimeoutError: sync did not complete within 120s retrievable=True (241s)
+physics: root 08a399c4c66d… golden=yes synced=TimeoutError: sync did not complete within 120s retrievable=True (250s)
+mathematics: root 8972c727d133… golden=yes synced=TimeoutError: sync did not complete within 120s retrievable=True (258s)
+chemistry: not retrievable (False); re-upload 1: 200
+chemistry: root f932436a36cb… golden=yes synced=TimeoutError: sync did not complete within 120s (last sync error: RuntimeError('node reports 73b613417cae64bc… not yet retrievable from the network; retrying root f932436a… later')) retrievable=True (283s)
+biology: not retrievable (False); re-upload 1: 200
+biology: root c79b9fddeb93… golden=yes synced=TimeoutError: sync did not complete within 120s retrievable=True (277s)
+medicine: not retrievable (False); re-upload 1: 200
+medicine: root e6b75a6b9a0d… golden=yes synced=TimeoutError: sync did not complete within 120s retrievable=True (281s)
+ai: root 460e83e2821f… golden=yes synced=TimeoutError: sync did not complete within 120s retrievable=True (255s)
+economics: root 2c589d015a20… golden=yes synced=TimeoutError: sync did not complete within 120s retrievable=True (248s)
+computing: root cc10508029fa… golden=yes synced=TimeoutError: sync did not complete within 120s retrievable=True (253s)
+geography: root 09efed6df732… golden=yes synced=TimeoutError: sync did not complete within 120s retrievable=True (245s)
+space: root 3d0ef2dbaf29… golden=yes synced=TimeoutError: sync did not complete within 120s retrievable=True (243s)

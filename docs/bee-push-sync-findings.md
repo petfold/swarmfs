@@ -7,15 +7,61 @@ ontodag's packs. Raw evidence is in `bee-push-sync-evidence/`; `topology.json`
 see `topology-and-buckets-summary.json`, and regenerate the originals with
 `GET /topology` and `GET /stamps/<batch>/buckets`.
 
-**Not filed upstream.** The observability claim holds, but the data-loss claim
-could not be reproduced with a plain HTTP upload, and Bee offers tags and
-`query_upload_progress` for exactly the "did it land" question — see the
-negative-result section below. Re-read that before filing anything.
+**Not filed upstream in September.** The observability claim held, but the
+data-loss claim could not be reproduced with a plain HTTP upload — see the
+negative-result section below. **It happened again on 2026-10-07** (next
+section), with the same node software and the same signature, so it is a
+pattern, not a one-off; the draft issue is `bee-issue-draft.md`.
 
 **Observed on:** Bee `2.8.2-7e703f49`, API `8.1.1`, **light node**, Gnosis mainnet,
 via Swarm Desktop. 2026-09-11, ~03:00-03:30 UTC.
 
-## Summary
+## Second occurrence, 2026-10-07
+
+Same node software (Bee `2.8.2-7e703f49`, light node, `reachability:
+Private`, 138 connected peers, Swarm Desktop), same kind of burst:
+republishing ontodag's core and ten domain packs, eleven content-addressed
+stores of several thousand single-chunk blobs each, through the local-first
+path (deferred uploads). Metrics since the node's restart shortly before
+the run (`bee-push-sync-evidence/2026-10-07-metrics.txt`):
+
+| metric | value |
+|---|---|
+| `bee_pusher_total_to_push` | 372,313 |
+| `bee_pusher_total_synced` | 372,313 |
+| `bee_pusher_total_errors` | 36,118 |
+| `bee_pushsync_shallow_receipt` | 36,589 |
+| `bee_pushsync_shallow_receipt_depth{depth="0"}` | 14,854 |
+| `bee_pushsync_shallow_receipt_depth{depth="8"}` | 10,910 |
+| `bee_pushsync_receipt_depth`, the largest bins | depth 9: 156,150; depth 10: 84,911; depth 11: 44,503 |
+| node's topology depth (`GET /topology`) | 9 |
+
+Again the queue reads fully drained (`to_push == synced`), again shallow
+receipts track pusher errors almost one-for-one (about 10% of pushes), and
+again three of the eleven root blobs (chemistry, biology, medicine) were
+not retrievable after their upload. This time one `PUT /stewardship` each
+fixed them (200, retrievable on the next check;
+`bee-push-sync-evidence/2026-10-07-publish.log`).
+
+Two things this run adds:
+
+1. **Depth-0 receipts.** 14,854 shallow receipts came from peers at
+   proximity 0 to the chunk: peers sharing no address prefix with it,
+   as far from its neighbourhood as a peer can be. A receipt from there
+   can only mean the chunk was not forwarded towards its neighbourhood.
+2. **Replicas did not prevent it.** Bee 2.8.2 uploads at redundancy level
+   MEDIUM when no `Swarm-Redundancy-Level` header is sent
+   (`redundancy.DefaultUploadLevel`; the uploads here sent none), so every
+   blob's root chunk also went up as 2 dispersed replicas. Those travel by
+   the same push-sync, and the roots were still unretrievable.
+
+The client side now repairs instead of waiting: swarmfs's `Syncer` and
+recordstore's `BeeBytesStore.confirm()` check what they uploaded with
+`GET /stewardship` and push only the missing blobs again (directly, or
+with `PUT /stewardship`). That makes our data safe; it does not make the
+node honest about what it delivered, which is what the issue asks for.
+
+## Summary (September)
 
 Uploading ~250k chunks in eleven batches, the node reported every upload as
 accepted and its pusher queue as fully drained — `bee_pusher_total_to_push ==

@@ -44,12 +44,20 @@ class FakeRemote:
         self.fail_after = None    # raise after N successful pushes
         self.retrievable = True
         self.corrupt = {}         # ref -> bytes served instead
+        self.lose = set()         # refs whose deferred push is lost in delivery
+        self.lost = set()         # ... and are now missing from the network
+        self.direct = []          # refs pushed again as direct uploads
 
     def push_blob(self, ref, data, deferred=True):
         if self.fail_after is not None and self.pushes >= self.fail_after:
             raise ConnectionError("injected: network down")
         self.blobs[ref] = data
         self.pushes += 1
+        if not deferred:
+            self.direct.append(ref)
+            self.lost.discard(ref)
+        elif ref in self.lose:
+            self.lost.add(ref)    # a shallow receipt: counted, never kept
 
     def fetch(self, ref):
         if ref in self.corrupt:
@@ -57,7 +65,7 @@ class FakeRemote:
         return self.blobs[ref]
 
     def is_retrievable(self, ref):
-        return self.retrievable and ref in self.blobs
+        return self.retrievable and ref in self.blobs and ref not in self.lost
 
     def batch_info(self):
         return "fakebatch", 1e9
@@ -193,6 +201,39 @@ def test_stewardship_false_defers_confirmation(store):
         remote.retrievable = True
         syncer.sync(timeout=WAIT)
         assert store.network_confirmed(root)
+
+
+def test_a_blob_lost_in_delivery_is_pushed_again_and_only_it(store):
+    """The node may count a chunk delivered on a shallow receipt and never
+    retry it (swarmfs docs/bee-push-sync-findings.md): the root stays
+    unretrievable while the pusher reports it synced. Confirmation finds
+    the missing blob, pushes it again directly from the local copy, and
+    confirms on a later round; blobs that arrived are not resent."""
+    remote = FakeRemote()
+    datas = [bytes([i]) * 20 for i in range(8)]
+    refs = [store.address(d) for d in datas]
+    remote.lose = {refs[3], refs[5]}
+    with Syncer(store, remote, fast_policy()) as syncer:
+        root, _ = commit_blobs(store, *datas)
+        syncer.sync(timeout=WAIT)
+        assert store.network_confirmed(root)
+        assert sorted(remote.direct) == sorted({refs[3], refs[5]})
+        assert syncer.repaired == {refs[3]: 1, refs[5]: 1}
+
+
+def test_a_small_sample_still_repairs_the_whole_root(store):
+    """Only a quarter of a root's blobs are sampled; once one of them is
+    missing, every blob of the root is checked, so a loss outside the
+    sample is repaired too."""
+    remote = FakeRemote()
+    datas = [bytes([i]) * 20 for i in range(12)]
+    refs = [store.address(d) for d in datas]
+    remote.lose = set(refs)                    # all lost: the sample must hit
+    with Syncer(store, remote, fast_policy(confirm_sample=0.25)) as syncer:
+        root, _ = commit_blobs(store, *datas)
+        syncer.sync(timeout=WAIT)
+        assert store.network_confirmed(root)
+        assert sorted(remote.direct) == sorted(refs)
 
 
 def test_sample_zero_trusts_node_claims(store):

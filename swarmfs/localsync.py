@@ -25,6 +25,15 @@ Trust tiering (design doc, *Verification and trust*):
 - every upload asserts the node returned the locally computed reference
   (free: the ref is the blob's filename) — the tripwire for the
   erasure-coding address-space fork.
+- a blob the network cannot retrieve is *repaired*, not just waited for:
+  the node's push-sync can count a chunk delivered on a "shallow receipt"
+  from a peer too far from the chunk's neighbourhood to keep it, and then
+  never retries it (seen twice on Gnosis mainnet: 29,602 shallow receipts
+  in 2026-09, 36,589 of 372,313 pushes on 2026-10-07, both with the
+  pusher reporting everything synced). When a sampled blob is not
+  retrievable, every blob of that root is checked, each missing one is
+  pushed again from the local copy as a direct (non-deferred) upload, and
+  the next round checks again. Only missing blobs are resent.
 
 Push triggers are the WAL-checkpoint trio (design doc, *Auto-push policy*):
 debounce, max staleness, pinned-bytes threshold; `sync()` and budget
@@ -182,6 +191,10 @@ class Syncer:
             self.policy.pinned_bytes_limit = store.max_bytes // 4
         self.state = "idle"
         self.last_error: Optional[Exception] = None
+        #: Blobs pushed again because the network could not retrieve
+        #: them after their first push: {ref: times}. A blob listed here
+        #: was lost in delivery, not on this disk.
+        self.repaired: dict = {}
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._urgent = False
@@ -306,13 +319,28 @@ class Syncer:
                         f"retrieve-and-verify failed for {ref[:16]}… of "
                         f"root {root[:8]}…: fetched bytes do not hash to "
                         "the reference")
-                if not self.remote.is_retrievable(ref):
-                    raise RuntimeError(
-                        f"node reports {ref[:16]}… not yet retrievable "
-                        f"from the network; retrying root {root[:8]}… "
-                        "later")
+            if any(not self.remote.is_retrievable(ref) for ref in sample):
+                self._repair(root, state.blobs)
             batch, ttl = self.remote.batch_info()
             self.store.mark_confirmed(root, batch=batch, ttl=ttl)
+
+    def _repair(self, root: str, blobs: list) -> None:
+        """A sampled blob of `root` is missing from the network: check every
+        blob of the root, push each missing one again directly from the
+        local copy (pinned until confirmed), and leave the root to be
+        checked on a later round. Raises, so the worker backs off first."""
+        missing = [ref for ref in blobs if not self.remote.is_retrievable(ref)]
+        if not missing:
+            return                  # a passing blip: the whole root is there
+        for ref in missing:
+            if self._stop.is_set():
+                break
+            self.remote.push_blob(ref, self.store.get(ref), deferred=False)
+            self.repaired[ref] = self.repaired.get(ref, 0) + 1
+        raise RuntimeError(
+            f"{len(missing)} of {len(blobs)} blobs of root {root[:8]}… were "
+            "not retrievable from the network; pushed again directly, "
+            "checking again later")
 
     def _sample(self, blobs: list) -> list:
         frac = self.policy.confirm_sample
