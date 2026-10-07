@@ -366,7 +366,7 @@ read.
 
 ```bash
 pip install -e ".[test]"
-pytest                                   # 470 tests; the live ones skip with no node (plus `pytest -m bench`)
+pytest                                   # 477 tests; the live ones skip with no node (plus `pytest -m bench`)
 SWARMFS_TEST_BEE=http://localhost:1633 \
 SWARMFS_TEST_STAMP=<batch-id> pytest tests/test_integration.py
 ```

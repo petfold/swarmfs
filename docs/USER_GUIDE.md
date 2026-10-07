@@ -455,7 +455,9 @@ and a background worker uploads and *confirms* them on Swarm afterwards.
 You can write a dataset on a plane, read every bit of it back — `ls`,
 ranged reads, the lot — and let it sync when you land; `fs.sync()` blocks
 until everything is provably on the network, `fs.sync_status()` shows how
-far along it is. The [README](../README.md#local-first-writes) has the
+far along it is. The worker uploads, checks and re-sends 32 blobs at a time
+(a light node answers each check in about a second), and a blob the network
+lost after accepting it is uploaded again from the local copy. The [README](../README.md#local-first-writes) has the
 short version; the full design is in
 [localstore-design.md](localstore-design.md).
 

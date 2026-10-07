@@ -66,6 +66,110 @@ def test_format_file_refused_when_unsupported(tmp_path):
         make_store(tmp_path)
 
 
+# -- reads from the network: heals, read-through, concurrency ---------------------
+
+
+class _Network:
+    """A fetcher over a dict of blobs; counts calls and overlap."""
+
+    def __init__(self, blobs, delay=0.0):
+        import threading
+        self.blobs, self.delay = dict(blobs), delay
+        self.calls, self.active, self.peak = 0, 0, 0
+        self._lock = threading.Lock()
+
+    def __call__(self, ref):
+        import time
+        with self._lock:
+            self.calls += 1
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+        time.sleep(self.delay)
+        with self._lock:
+            self.active -= 1
+        if ref not in self.blobs:
+            raise FileNotFoundError(ref)  # what the client raises on a 404
+        return self.blobs[ref]
+
+
+def _evicted_store(tmp_path, n, **kw):
+    """A store whose `n` blobs were confirmed and then all evicted."""
+    s = make_store(tmp_path, **kw)
+    datas = [blob(i) for i in range(n)]
+    refs = [s.put(d) for d in datas]
+    s.commit_root(refs[0], None, refs)
+    s.mark_pushed(refs[0])
+    s.mark_confirmed(refs[0], batch="b1", ttl=None)
+    s.evict(10 ** 9)
+    assert not any(s.has_local(r) for r in refs)
+    return s, dict(zip(refs, datas))
+
+
+def test_get_many_heals_evicted_blobs_in_parallel(tmp_path):
+    s, blobs = _evicted_store(tmp_path, 40, fetch_concurrency=8)
+    net = _Network(blobs, delay=0.02)
+    s.fetcher = net
+    with s:
+        assert s.get_many(list(blobs)) == blobs
+        assert 1 < net.peak <= 8 and net.calls == 40
+        assert all(s.has_local(r) for r in blobs)  # healed: stored again
+
+
+def test_get_many_one_at_a_time_when_asked(tmp_path):
+    s, blobs = _evicted_store(tmp_path, 10, fetch_concurrency=1)
+    net = _Network(blobs, delay=0.01)
+    s.fetcher = net
+    with s:
+        assert s.get_many(list(blobs)) == blobs
+        assert net.peak == 1
+
+
+def test_blobs_never_held_are_a_keyerror_without_read_through(tmp_path):
+    foreign = {"ab" * 32: b"elsewhere"}
+    with make_store(tmp_path) as s:
+        s.fetcher = net = _Network(foreign)
+        with pytest.raises(KeyError):
+            s.get("ab" * 32)
+        with pytest.raises(KeyError):
+            s.get_many(["ab" * 32])
+        assert net.calls == 0  # refused before any request
+
+
+def test_read_through_fetches_verifies_and_does_not_store(tmp_path):
+    import hashlib
+    from swarmfs.localstore import BlobVerificationFailed
+
+    data = b"published by someone else"
+    ref = hashlib.sha256(data).hexdigest()
+    with make_store(tmp_path, read_through=True) as s:
+        with pytest.raises(KeyError):  # no fetcher: nothing to read through
+            s.get(ref)
+        s.fetcher = _Network({ref: data})
+        assert s.get(ref) == data
+        assert s.get_many([ref, ref]) == {ref: data}
+        assert not s.has_local(ref)  # belongs to no root here: not kept
+        assert s.status().blob_count == 0
+        with pytest.raises(KeyError):  # not on the network either
+            s.get("cd" * 32)
+        s.fetcher = _Network({ref: b"tampered"})
+        with pytest.raises(BlobVerificationFailed):
+            s.get(ref)
+
+
+def test_get_many_mixes_local_healed_and_read_through(tmp_path):
+    import hashlib
+
+    s, evicted = _evicted_store(tmp_path, 5, read_through=True)
+    with s:
+        local = s.put(b"still here")
+        s.commit_root(local, None, [local])
+        foreign = {hashlib.sha256(b"theirs").hexdigest(): b"theirs"}
+        s.fetcher = net = _Network({**evicted, **foreign})
+        want = {**evicted, **foreign, local: b"still here"}
+        assert s.get_many(list(want)) == want
+        assert net.calls == 6  # the local blob came from disk
+
+
 # -- the invariant: pinned vs evictable ----------------------------------------
 
 

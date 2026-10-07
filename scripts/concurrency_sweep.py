@@ -13,6 +13,11 @@ Times two operations at a range of concurrency levels and prints a table:
 - ``stewardship``: ``GET /stewardship/<ref>``, the network check the sync
   worker uses to confirm a root. Its answer is not cached, so refs can be
   reused.
+- ``upload`` / ``upload-direct``: ``POST /bytes`` of fresh random blobs,
+  deferred (the node stores and pushes in the background, as the sync
+  worker uploads) or direct (the request returns once the network has it,
+  as the worker's repairs upload). Needs ``--batch``; uses one chunk of
+  the batch per request, so a sweep costs a few thousand.
 
 The best number depends on the node (light or full, its peers, how its
 bandwidth accounting throttles) more than on the machine running this:
@@ -22,10 +27,11 @@ defaults were measured with this script; see ``CHECK_CONCURRENCY`` in
 
     scripts/concurrency_sweep.py --refs refs.txt --op read
     scripts/concurrency_sweep.py --refs refs.txt --op stewardship --levels 8,16,32,64
+    scripts/concurrency_sweep.py --op upload --batch <batch-id> --size 400
 
-``refs.txt`` holds one 64-hex reference per line. Nothing is uploaded and
-no postage is used; reads from the network cost the node's usual (tiny)
-bandwidth payments.
+``refs.txt`` holds one 64-hex reference per line. Reads and checks upload
+nothing and use no postage; reads from the network cost the node's usual
+(tiny) bandwidth payments.
 """
 
 import argparse
@@ -38,7 +44,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from swarmfs._client import SwarmClient  # noqa: E402
 
 
-async def measure(api, op, refs, concurrency):
+async def measure(api, op, refs, concurrency, batch=None, size=400):
     client = SwarmClient(api, timeout=300)
     gate = asyncio.Semaphore(concurrency)
     latencies, errors = [], []
@@ -49,8 +55,12 @@ async def measure(api, op, refs, concurrency):
             try:
                 if op == "read":
                     await client.bytes_get(ref)
-                elif not await client.stewardship_get(ref):
-                    errors.append("not retrievable")
+                elif op == "stewardship":
+                    if not await client.stewardship_get(ref):
+                        errors.append("not retrievable")
+                else:
+                    await client.bytes_post(os.urandom(size), batch,
+                                            deferred=(op == "upload"))
             except Exception as e:  # count it; one failure must not end the run
                 errors.append(type(e).__name__)
             latencies.append(time.perf_counter() - start)
@@ -66,8 +76,13 @@ async def measure(api, op, refs, concurrency):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--api", default=os.environ.get("BEE_API_URL", "http://localhost:1633"))
-    ap.add_argument("--refs", required=True, help="file with one reference per line")
-    ap.add_argument("--op", choices=("read", "stewardship"), default="read")
+    ap.add_argument("--refs", help="file with one reference per line "
+                    "(reads and stewardship)")
+    ap.add_argument("--op", choices=("read", "stewardship", "upload",
+                                     "upload-direct"), default="read")
+    ap.add_argument("--batch", help="postage batch id (uploads)")
+    ap.add_argument("--size", type=int, default=400,
+                    help="bytes per uploaded blob (default: a typical record)")
     ap.add_argument("--levels", default="1,2,4,8,16,32,48,64,128",
                     help="comma-separated concurrency levels")
     ap.add_argument("--per-request", type=int, default=25,
@@ -80,8 +95,15 @@ def main():
                          "has drained before the next starts")
     args = ap.parse_args()
 
-    with open(args.refs) as fh:
-        refs = [line.strip() for line in fh if line.strip()]
+    uploading = args.op.startswith("upload")
+    if uploading and not args.batch:
+        sys.exit("uploads need --batch")
+    if not uploading and not args.refs:
+        sys.exit(f"{args.op} needs --refs")
+    refs = []
+    if args.refs:
+        with open(args.refs) as fh:
+            refs = [line.strip() for line in fh if line.strip()]
     levels = [int(x) for x in args.levels.split(",")]
     sizes = [max(args.min, min(args.cap, args.per_request * c)) for c in levels]
     if args.op == "read" and sum(sizes) > len(refs):
@@ -96,9 +118,12 @@ def main():
             time.sleep(args.pause)
         if args.op == "read":
             batch, used = refs[used:used + n], used + n
+        elif uploading:
+            batch = [None] * n
         else:
             batch = (refs * (n // len(refs) + 1))[:n]
-        wall, median, errors = asyncio.run(measure(args.api, args.op, batch, c))
+        wall, median, errors = asyncio.run(
+            measure(args.api, args.op, batch, c, args.batch, args.size))
         print(f"{c:8d} {n:9d} {n / wall:8.1f} {1000 * median:7.0f} ms  "
               f"{len(errors)}{' ' + str(sorted(set(errors))) if errors else ''}",
               flush=True)

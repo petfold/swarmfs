@@ -50,17 +50,19 @@ class FakeRemote:
         self.lose = set()         # refs whose deferred push is lost in delivery
         self.lost = set()         # ... and are now missing from the network
         self.direct = []          # refs pushed again as direct uploads
+        self._push_lock = threading.Lock()  # pushes arrive from a pool
 
     def push_blob(self, ref, data, deferred=True):
-        if self.fail_after is not None and self.pushes >= self.fail_after:
-            raise ConnectionError("injected: network down")
-        self.blobs[ref] = data
-        self.pushes += 1
-        if not deferred:
-            self.direct.append(ref)
-            self.lost.discard(ref)
-        elif ref in self.lose:
-            self.lost.add(ref)    # a shallow receipt: counted, never kept
+        with self._push_lock:
+            if self.fail_after is not None and self.pushes >= self.fail_after:
+                raise ConnectionError("injected: network down")
+            self.blobs[ref] = data
+            self.pushes += 1
+            if not deferred:
+                self.direct.append(ref)
+                self.lost.discard(ref)
+            elif ref in self.lose:
+                self.lost.add(ref)    # a shallow receipt: counted, never kept
 
     def fetch(self, ref):
         if ref in self.corrupt:
@@ -284,6 +286,37 @@ def test_checks_overlap_up_to_the_limit(store, limit):
         root, _ = commit_blobs(store, *datas)
         syncer.sync(timeout=WAIT)
         assert store.network_confirmed(root)
+    assert remote.peak == 1 if limit == 1 else 1 < remote.peak <= limit
+
+
+class _SlowPushRemote(FakeRemote):
+    """Each upload takes a while; records how many overlap."""
+
+    def __init__(self, delay=0.03):
+        super().__init__()
+        self.delay, self.active, self.peak = delay, 0, 0
+        self._gauge = threading.Lock()
+
+    def push_blob(self, ref, data, deferred=True):
+        with self._gauge:
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+        time.sleep(self.delay)
+        with self._gauge:
+            self.active -= 1
+        super().push_blob(ref, data, deferred)
+
+
+@pytest.mark.parametrize("limit", [1, 8])
+def test_pushes_overlap_up_to_the_limit(store, limit):
+    remote = _SlowPushRemote()
+    datas = [bytes([i]) * 20 for i in range(30)]
+    policy = fast_policy(push_concurrency=limit)
+    with Syncer(store, remote, policy) as syncer:
+        root, refs = commit_blobs(store, *datas)
+        syncer.sync(timeout=WAIT)
+        assert store.network_confirmed(root)
+    assert set(refs) <= set(remote.blobs)
     assert remote.peak == 1 if limit == 1 else 1 < remote.peak <= limit
 
 

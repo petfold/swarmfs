@@ -12,6 +12,39 @@ claiming more detail than the history holds.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-10-08
+
+### Added
+
+- **Network reads go 32 at a time.** `LocalStore.get_many` fetched whatever
+  was not on disk one blob at a time; it now keeps `fetch_concurrency`
+  (default `FETCH_CONCURRENCY` = 32) requests in flight, and heals enforce
+  the byte budget once per batch instead of once per blob. Measured against
+  a Bee 2.8.2 light node: a read of a chunk the node must fetch takes about
+  270 ms, 4/s one at a time, 85-108/s at 32 at once.
+- **`read_through`: a store can read blobs it never held**, as a fresh
+  replica following a published root must. With `read_through=True` and a
+  `fetcher` attached (a Syncer attaches one), such a read is fetched,
+  hash-verified and returned *without* being stored: the blob belongs to no
+  root of this store, which could account for it neither as pinned nor as
+  evictable. Off by default — such a read is then a `KeyError`, as before —
+  and a ref the network does not have either is a `KeyError` too.
+- **Uploads go 32 at a time** (`SyncPolicy.push_concurrency`, default
+  `PUSH_CONCURRENCY`): the worker's pushes and its repair re-pushes.
+  Measured, same node: deferred uploads (the worker's kind: the node stores
+  them and pushes on its own) 249/s one at a time, 609/s at 4, 869/s at 16,
+  914/s at 32, 896/s at 64, where the node's local work has levelled off; direct uploads (the
+  repairs: the request returns once the network has the chunk, ~300 ms)
+  2.6/s one at a time, 34/s at 16, 64/s at 32, 85/s at 64.
+- `scripts/concurrency_sweep.py` measures uploads too (`--op upload`,
+  `--op upload-direct`, with `--batch`; one chunk of the batch per request).
+
+### Changed
+
+- `LocalStore.get_many` refuses a ref it cannot fetch (never held and no
+  read-through, or evicted with no fetcher) before making any request,
+  where it used to fail on reaching it after fetching the ones before.
+
 ## [0.11.2] — 2026-10-08
 
 ### Fixed

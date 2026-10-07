@@ -296,7 +296,12 @@ that story honest:
    network round trip — small relatively, but BMT is pure Python and
    nonzero on large blobs, so it is a knob with swarmfs's own `verify`
    semantics as precedent: on by default, disableable for a trusted-node
-   setup.
+   setup. The same check covers *read-through* (0.12): a store opened
+   with `read_through=True` reads blobs it never held — a fresh replica
+   following a published root — verified the same way but **not stored**.
+   Such a blob belongs to no root here, and the eviction rules can only
+   account for blobs a root lists (an unlisted blob is treated as a commit
+   in progress, i.e. pinned), so keeping it would grow an unevictable pile.
 2. **Push ref-equality assertion (L1 requirement, not optional).** The
    reference the node returns for an upload MUST equal the locally
    computed one, or the push fails loudly. This is a free end-to-end

@@ -8,7 +8,7 @@ local-first design in [localstore-design.md](localstore-design.md) and its
 Tables here are pinned against the code by `tests/test_reference.py` — if a
 name or parameter in this file and the code disagree, the suite fails.
 
-Package version this file describes: `0.11.2`.
+Package version this file describes: `0.12.0`.
 
 ## 1. Vocabulary
 
@@ -151,9 +151,10 @@ Swarm holds it. On-disk format: [localstore-format.md](localstore-format.md).
 
 | member | signature | semantics |
 |---|---|---|
-| `localstore.LocalStore` | `(path, addressing="swarm", max_bytes=None, min_free_bytes=None, min_evict_ttl=604800, fetcher=None, verify_fetch=True, durability="commit")` | open/create a store directory (flock: single writer). `max_bytes` is soft for pinned data. `durability`: `"commit"` batches fsyncs at the commit barrier, `"blob"` fsyncs per put. |
+| `localstore.LocalStore` | `(path, addressing="swarm", max_bytes=None, min_free_bytes=None, min_evict_ttl=604800, fetcher=None, verify_fetch=True, durability="commit", read_through=False, fetch_concurrency=32)` | open/create a store directory (flock: single writer). `max_bytes` is soft for pinned data. `durability`: `"commit"` batches fsyncs at the commit barrier, `"blob"` fsyncs per put. `read_through`: read refs this store never held through `fetcher` (verified, not stored). |
 | `localstore.LocalStore.put` | `(data)` | store a blob → ref. Orphans (not yet committed) are never evicted. |
-| `localstore.LocalStore.get` | `(ref)` | bytes; heals evicted refs through `fetcher` (verified); `KeyError` unknown, `BlobEvicted` known-but-offline. |
+| `localstore.LocalStore.get` | `(ref)` | bytes; heals evicted refs through `fetcher` (verified, stored again); with `read_through`, reads refs never held here through it too (verified, not stored); `KeyError` unknown (or not on the network either), `BlobEvicted` known-but-no-fetcher. |
+| `localstore.LocalStore.get_many` | `(refs)` | `{ref: bytes}`: local blobs from disk, the rest fetched `fetch_concurrency` at a time; a ref that cannot be fetched raises before any request is made. |
 | `localstore.LocalStore.commit_root` | `(root, parent, blobs, structure=())` | journal a commit: `blobs` = the NEW blobs, `structure` = the index-node subset (eviction priority). |
 | `localstore.LocalStore.mark_pushed` | `(root)` | rung: the node accepted the push (call after the fact — the lag rule). |
 | `localstore.LocalStore.mark_confirmed` | `(root, batch=None, ttl=None)` | rung: verified on the network; parents first; flips blobs evictable. |
@@ -167,6 +168,7 @@ Swarm holds it. On-disk format: [localstore-format.md](localstore-format.md).
 | `localstore.LocalStore.status` | `()` | `StoreStatus`. |
 | `localstore.LocalStore.add_listener` | `(fn)` | push notifications: `fn(event)` after every journal append. Cross-process: tail `journal.jsonl`. |
 | `localstore.LocalStore.latest_root` | `()` / `has_root(root)` / `parent_of(root)` / `roots_below(rung)` | the journal as pointer and reflog. |
+| `localstore.FETCH_CONCURRENCY` | `32` | network fetches `get_many` keeps in flight by default: a read of a chunk the node must fetch takes ~270 ms, and throughput grows ~4/s per request in flight up to 32 (measured against a Bee 2.8.2 light node). |
 | `localstore.MemoryCacheStore` | `(inner, max_bytes=67108864)` | byte-budgeted LRU cache in front of any blob store (transparent, not a replica). |
 | `localstore.BlobEvicted` | exception (`KeyError`) | known ref, bytes on Swarm, no way to fetch right now. |
 | `localstore.BlobVerificationFailed` | exception | bytes do not hash to their ref (fetch, push echo, scrub, torn orphan). |
@@ -182,13 +184,14 @@ expiry — the number to watch once local is partial).
 
 | member | signature | semantics |
 |---|---|---|
-| `localsync.Syncer` | `(store, remote, policy=None, witness=None)` | wires itself in (journal listener + the store's fetcher); `start()`/`stop()`; context manager. A blob the network cannot retrieve is repaired: when a sampled blob of a root is missing, every blob of that root is checked and each missing one is pushed again directly from the local copy (only missing blobs are resent; `docs/bee-push-sync-findings.md`); the instance's `repaired` maps each to how often. Checks run `policy.check_concurrency` at a time. |
+| `localsync.Syncer` | `(store, remote, policy=None, witness=None)` | wires itself in (journal listener + the store's fetcher); `start()`/`stop()`; context manager. A blob the network cannot retrieve is repaired: when a sampled blob of a root is missing, every blob of that root is checked and each missing one is pushed again directly from the local copy (only missing blobs are resent; `docs/bee-push-sync-findings.md`); the instance's `repaired` maps each to how often. Checks run `policy.check_concurrency` at a time, uploads `policy.push_concurrency`. |
 | `localsync.Syncer.sync` | `(timeout=None)` | block until everything is network-confirmed; `TimeoutError` names the last sync error. |
 | `localsync.Syncer.trusting_node_claims` | property | True when `confirm_sample == 0` — eviction safety rests on stewardship alone. |
 | `localsync.BeeRemote` | `(api_url=None, stamp="auto", client=None, min_batch_ttl=86400)` | the Swarm side. `"auto"` resolves lazily (offline construction works); `stamp=None` = read-only witness shape. |
 | `localsync.BeeRemote.push_blob` | `(ref, data, deferred=True)` | upload; **asserts the node returns the locally computed ref** (erasure-coding tripwire). |
-| `localsync.SyncPolicy` | dataclass | `debounce=10.0`, `max_staleness=300.0`, `pinned_bytes_limit=None` (→ budget/4), `confirm_sample=0.25`, `direct_upload=False`, `backoff_base=1.0`, `backoff_max=60.0`, `check_concurrency=32`. |
+| `localsync.SyncPolicy` | dataclass | `debounce=10.0`, `max_staleness=300.0`, `pinned_bytes_limit=None` (→ budget/4), `confirm_sample=0.25`, `direct_upload=False`, `backoff_base=1.0`, `backoff_max=60.0`, `check_concurrency=32`, `push_concurrency=32`. |
 | `localsync.CHECK_CONCURRENCY` | `32` | how many confirmation checks (retrieve-and-verify fetches, stewardship calls) run at once; each takes about a second on a light node, almost all of it waiting. Measured, not guessed: `scripts/concurrency_sweep.py` measures your node. |
+| `localsync.PUSH_CONCURRENCY` | `32` | how many uploads (the worker's deferred pushes, its direct repair re-pushes) run at once. Measured: deferred uploads level off near 900/s from 16-32 at once; direct ones grow to 85/s at 64. |
 | `localsync.MIN_CONFIRM_SAMPLE` | `16` | the smallest sample `confirm_sample` takes of a root's blobs (a smaller root is checked whole); `confirm_sample=0` still turns sampling off. |
 
 Confirmation is p2p-native: Bee's stewardship check retrieves every chunk

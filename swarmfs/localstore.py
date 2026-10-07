@@ -32,6 +32,7 @@ import json
 import os
 import shutil
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import warnings
 from collections import OrderedDict
@@ -112,6 +113,16 @@ class StoreStatus:
     batch_expiries: Dict[str, float] = field(default_factory=dict)
 
 
+#: How many blobs `get_many` fetches from the network at once: heals of
+#: evicted blobs, and reads of blobs this store never held (`read_through`).
+#: Measured 2026-10-07 against a Bee 2.8.2 light node: a read of a chunk
+#: the node must fetch takes about 270 ms, and throughput grows by about
+#: 4/s per request in flight up to 32 (one at a time 4/s, 32 at once
+#: 85-108/s), noisy beyond. See `localsync.CHECK_CONCURRENCY`, and
+#: `scripts/concurrency_sweep.py` to measure another node.
+FETCH_CONCURRENCY = 32
+
+
 class LocalStore:
     """A local-first blob store over one on-disk store directory.
 
@@ -126,6 +137,14 @@ class LocalStore:
     triggers eviction of *evictable* blobs only (payload before structure,
     LRU within each class, TTL-risky blobs skipped). Pinned data is never
     evicted; if it alone exceeds the budget the store warns and proceeds.
+
+    With a ``fetcher`` attached (a Syncer attaches its remote's), reads of
+    evicted blobs heal from the network. ``read_through=True`` also reads
+    blobs this store never held — a fresh replica following a published
+    root — fetched, hash-verified and returned *without* being stored: they
+    belong to no root of this store, which could account for them neither
+    as pinned nor as evictable. ``get_many`` fetches ``fetch_concurrency``
+    blobs at a time.
     """
 
     def __init__(self, path: str, addressing: str = "swarm",
@@ -134,7 +153,9 @@ class LocalStore:
                  min_evict_ttl: float = DEFAULT_MIN_EVICT_TTL,
                  fetcher: Optional[Callable[[str], bytes]] = None,
                  verify_fetch: bool = True,
-                 durability: str = "commit"):
+                 durability: str = "commit",
+                 read_through: bool = False,
+                 fetch_concurrency: int = FETCH_CONCURRENCY):
         #: fsync policy — "commit" (default): blobs are written without
         #: fsync and `commit_root` flushes the listed blobs (and their
         #: directories) in one barrier before the journal event, so a
@@ -155,6 +176,11 @@ class LocalStore:
         #: (the verified-re-fetch requirement; disable only for a trusted
         #: node, mirroring swarmfs's own `verify` semantics).
         self.verify_fetch = verify_fetch
+        #: Read blobs this store never held through `fetcher` (verified, not
+        #: stored); off, such a read is a KeyError as for any BytesStore.
+        self.read_through = read_through
+        #: Network fetches `get_many` keeps in flight (see FETCH_CONCURRENCY).
+        self.fetch_concurrency = max(1, fetch_concurrency)
         if addressing not in ADDRESSINGS:
             raise ValueError(f"unknown addressing {addressing!r}; "
                              f"one of {ADDRESSINGS}")
@@ -465,35 +491,68 @@ class LocalStore:
                 os.close(fd)
 
     def get(self, ref: str) -> bytes:
+        data = self._read_local(ref)
+        if data is not None:
+            return data
+        self._check_fetchable(ref)
+        return self._fetch(ref)
+
+    def _read_local(self, ref: str) -> Optional[bytes]:
         path = self._blob_path(ref)
         try:
             with open(path, "rb") as f:
                 data = f.read()
         except FileNotFoundError:
-            if ref not in self._blob_roots:
-                raise KeyError(ref) from None
-            if self.fetcher is None:
-                raise BlobEvicted(
-                    f"{ref} was evicted locally; the bytes are on Swarm "
-                    "(attach a fetcher/Syncer, or reconnect)") from None
-            return self._heal(ref)
+            return None
         os.utime(path)  # recency signal for LRU eviction
         return data
 
-    def _heal(self, ref: str) -> bytes:
+    def _check_fetchable(self, ref: str) -> None:
+        """Raise, before any network traffic, for a blob that is not on
+        disk and cannot be fetched: never held here (and no read-through),
+        or evicted with nothing attached to heal it."""
+        known = ref in self._blob_roots
+        if not known and not self.read_through:
+            raise KeyError(ref)
+        if self.fetcher is None:
+            if known:
+                raise BlobEvicted(
+                    f"{ref} was evicted locally; the bytes are on Swarm "
+                    "(attach a fetcher/Syncer, or reconnect)")
+            raise KeyError(ref)
+
+    def _fetch(self, ref: str, enforce_budget: bool = True) -> bytes:
+        if ref in self._blob_roots:
+            return self._heal(ref, enforce_budget)
+        return self._read_through(ref)
+
+    def _verified(self, ref: str, data: bytes, what: str) -> bytes:
+        if self.verify_fetch and self._address(data) != ref:
+            raise BlobVerificationFailed(
+                f"{what} bytes for {ref[:16]}… do not hash to that "
+                "reference — the endpoint served wrong content")
+        return data
+
+    def _heal(self, ref: str, enforce_budget: bool = True) -> bytes:
         """Verified re-fetch of an evicted blob: pull it back through
         `fetcher`, check it hashes to its ref (unless `verify_fetch` is
         off — trusted node), re-store it locally, serve it."""
-        data = self.fetcher(ref)
-        if self.verify_fetch and self._address(data) != ref:
-            raise BlobVerificationFailed(
-                f"re-fetched bytes for {ref[:16]}… do not hash to that "
-                "reference — the endpoint served wrong content")
+        data = self._verified(ref, self.fetcher(ref), "re-fetched")
         with self._mutex:
             if ref not in self._local:
                 self._write_blob(ref, data)
-                self._enforce_budget()
+                if enforce_budget:
+                    self._enforce_budget()
         return data
+
+    def _read_through(self, ref: str) -> bytes:
+        """A blob this store never held, read from the network: verified,
+        returned, not stored (it belongs to no root here)."""
+        try:
+            data = self.fetcher(ref)
+        except FileNotFoundError:
+            raise KeyError(ref) from None  # not on the network either
+        return self._verified(ref, data, "fetched")
 
     def address(self, data: bytes) -> str:
         """This store's ref for `data` without storing it (the addressing
@@ -505,7 +564,36 @@ class LocalStore:
         return [self.put(d) for d in datas]
 
     def get_many(self, refs: Iterable[str]) -> Dict[str, bytes]:
-        return {r: self.get(r) for r in refs}
+        """Local blobs from disk; the rest from the network,
+        `fetch_concurrency` at a time. A blob that cannot be fetched raises
+        before any request is made."""
+        out: Dict[str, bytes] = {}
+        missing: List[str] = []
+        seen: Set[str] = set()
+        for ref in refs:
+            if ref in seen:
+                continue
+            seen.add(ref)
+            data = self._read_local(ref)
+            if data is None:
+                missing.append(ref)
+            else:
+                out[ref] = data
+        if not missing:
+            return out
+        for ref in missing:
+            self._check_fetchable(ref)
+        workers = min(self.fetch_concurrency, len(missing))
+        fetch = lambda ref: self._fetch(ref, enforce_budget=False)
+        if workers == 1:
+            fetched = [fetch(ref) for ref in missing]
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                fetched = list(pool.map(fetch, missing))
+        out.update(zip(missing, fetched))
+        with self._mutex:
+            self._enforce_budget()
+        return out
 
     def has_local(self, ref: str) -> bool:
         """Present on local disk right now (False for evicted/unknown)."""

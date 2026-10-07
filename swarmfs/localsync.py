@@ -82,6 +82,15 @@ MIN_CONFIRM_SAMPLE = 16
 #: `scripts/concurrency_sweep.py` measures it for yours.
 CHECK_CONCURRENCY = 32
 
+#: How many uploads run at once (`SyncPolicy.push_concurrency`): the
+#: worker's pushes and its repairs. Measured 2026-10-08, same node: deferred
+#: uploads (the worker's kind: the node stores, then pushes on its own) go
+#: 249/s one at a time, 609/s at 4, 869/s at 16, 914/s at 32 and 896/s at
+#: 64, where the node's local work has levelled off; direct uploads (repairs: the request
+#: returns once the network has the chunk, ~300 ms) go 2.6/s one at a time,
+#: 34/s at 16, 64/s at 32 and 85/s at 64. 32 serves both.
+PUSH_CONCURRENCY = 32
+
 
 @dataclass
 class SyncPolicy:
@@ -99,7 +108,8 @@ class SyncPolicy:
     `check_concurrency` is how many of those network checks (fetches and
     stewardship calls) run at once: each takes up to a second on a light
     node, almost all of it waiting, so one at a time made confirming a
-    large root take most of an hour.
+    large root take most of an hour. `push_concurrency` is the same for
+    uploads, the worker's pushes and its repairs.
     """
     debounce: float = 10.0
     max_staleness: float = 300.0
@@ -109,6 +119,7 @@ class SyncPolicy:
     backoff_base: float = 1.0
     backoff_max: float = 60.0
     check_concurrency: int = CHECK_CONCURRENCY
+    push_concurrency: int = PUSH_CONCURRENCY
 
 
 class BeeRemote:
@@ -321,13 +332,15 @@ class Syncer:
         return max(0.0, due_at - now)
 
     def _push_round(self) -> None:
+        deferred = not self.policy.direct_upload
         for root, state in self.store.roots_below(PUSHED):
             if self._stop.is_set():
                 return
-            for ref in state.blobs:
-                self.remote.push_blob(
-                    ref, self.store.get(ref),
-                    deferred=not self.policy.direct_upload)
+            self._each(lambda ref: self.remote.push_blob(
+                ref, self.store.get(ref), deferred=deferred),
+                state.blobs, self.policy.push_concurrency)
+            if self._stop.is_set():
+                return  # some blobs were skipped: not pushed yet
             self.store.mark_pushed(root)  # after the fact: the lag rule
 
     def _confirm_round(self) -> None:
@@ -360,11 +373,12 @@ class Syncer:
         missing = [ref for ref, ok in zip(blobs, retrievable) if not ok]
         if not missing:
             return                  # a passing blip: the whole root is there
-        for ref in missing:
-            if self._stop.is_set():
-                break
+        def repush(ref):
             self.remote.push_blob(ref, self.store.get(ref), deferred=False)
-            self.repaired[ref] = self.repaired.get(ref, 0) + 1
+            return ref
+        for ref in self._each(repush, missing, self.policy.push_concurrency):
+            if ref is not None:
+                self.repaired[ref] = self.repaired.get(ref, 0) + 1
         raise RuntimeError(
             f"{len(missing)} of {len(blobs)} blobs of root {root[:8]}… were "
             "not retrievable from the network; pushed again directly, "
@@ -378,15 +392,18 @@ class Syncer:
                 f"root {root[:8]}…: fetched bytes do not hash to "
                 "the reference")
 
-    def _each(self, fn, refs: list) -> list:
-        """``fn(ref)`` for every ref, ``policy.check_concurrency`` at a
-        time, results in order (None where the worker was stopping). The
-        remote's calls block — SyncSwarmClient runs each on fsspec's event
-        loop — so threads are what overlap them. An exception in any call
-        is raised here, after the others finish."""
+    def _each(self, fn, refs: list, limit: Optional[int] = None) -> list:
+        """``fn(ref)`` for every ref, `limit` (default
+        ``policy.check_concurrency``) at a time, results in order (None
+        where the worker was stopping). The remote's calls block —
+        SyncSwarmClient runs each on fsspec's event loop — so threads are
+        what overlap them. An exception in any call is raised here, after
+        the others finish."""
         def guarded(ref):
             return None if self._stop.is_set() else fn(ref)
-        workers = max(1, min(self.policy.check_concurrency, len(refs)))
+        if limit is None:
+            limit = self.policy.check_concurrency
+        workers = max(1, min(limit, len(refs)))
         if workers == 1:
             return [guarded(ref) for ref in refs]
         with ThreadPoolExecutor(max_workers=workers) as pool:
