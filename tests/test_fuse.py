@@ -274,7 +274,7 @@ def test_bzzf_mount_is_a_live_view_of_the_feed(manifest, tmp_path):
     reason = _fuse_unavailable()
     if reason:
         pytest.skip(reason)
-    pytest.importorskip("eth_keys")
+    pytest.importorskip("coincurve")
     from swarmfs import SwarmFeedFileSystem
     from swarmfs.feeds import FeedSigner
     from swarmfs.fuse import mount
@@ -437,7 +437,7 @@ def test_rw_bzzf_mount_publishes_the_feed(manifest, tmp_path):
     reason = _fuse_unavailable()
     if reason:
         pytest.skip(reason)
-    pytest.importorskip("eth_keys")
+    pytest.importorskip("coincurve")
     from swarmfs import SwarmFeedFileSystem
     from swarmfs.feeds import FeedSigner
     from swarmfs.fuse import mount

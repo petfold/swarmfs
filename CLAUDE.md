@@ -442,7 +442,7 @@ makes Parquet predicate pushdown and zarr chunk reads viable.
   whose head advances — plus an `_after_commit` hook that publishes a client-side-signed
   SOC feed update (bee-js `timestamp‖ref` format, same postage batch as the commit).
   Requires `signer=<private key hex>` in storage_options and the optional `feeds` extra
-  (`eth-keys`; `eth-hash` moved to core deps in 0.9). Missing/mismatched
+  (coincurve since 0.13, eth-keys before; `eth-hash` moved to core deps in 0.9). Missing/mismatched
   signers fail at *staging* time, before anything uploads.
 - **`swarmfs/bmt.py`**: BMT chunk addressing in pure Python — required for SOC signing
   (the signature covers the wrapped chunk's address), validated against the real
@@ -598,8 +598,10 @@ gateway selection/fallback (see next section).
   Keep runtime deps lean: `fsspec`, `aiohttp`, and (since 0.9) `eth-hash[pycryptodome]` —
   keccak turned out to be load-bearing far beyond feeds (verification, splitter,
   local-first addressing), and gating it behind the `feeds` extra crashed plain installs
-  on first gateway read. The `feeds` extra is now exactly `eth-keys`: feed signing and
-  signature verification, the genuinely optional part (and the heavier transitive tree).
+  on first gateway read. The `feeds` extra is now exactly coincurve (0.13; it was `eth-keys`):
+  feed signing only. Signature verification needs no extra since 0.13 —
+  `swarmfs/signer.py` recovers in pure Python when coincurve is absent (no secret
+  involved) and never signs without it.
   Everything else (numpy/zarr/pandas) is test/dev-only and optional.
 - Peter's context: comfortable with content-addressed tries over chunks (cf. his OntoDAG
   `recordstore` work). Don't over-explain Swarm internals; do surface API-shape decisions.

@@ -112,7 +112,7 @@ def test_partition_on_writes_hive_paths(opts):
 
 
 def test_signer_never_reaches_the_workers(manifest, monkeypatch):
-    pytest.importorskip("eth_keys")
+    pytest.importorskip("coincurve")
     from swarmfs.feeds import FeedSigner
 
     _, store = manifest
@@ -137,7 +137,7 @@ def test_signer_never_reaches_the_workers(manifest, monkeypatch):
 
 
 def test_dask_to_parquet_bzzf_publishes_once(manifest):
-    pytest.importorskip("eth_keys")
+    pytest.importorskip("coincurve")
     from swarmfs.feeds import FeedSigner, topic_bytes
 
     _, store = manifest

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("eth_keys")
+pytest.importorskip("coincurve")
 
 import fsspec  # noqa: E402
 

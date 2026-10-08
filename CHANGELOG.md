@@ -12,6 +12,39 @@ claiming more detail than the history holds.
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-10-08
+
+### Added
+
+- **`swarmfs.signer`: one secp256k1 signer, with no cryptography of our
+  own.** Signing, verification and key recovery are libsecp256k1's
+  (Bitcoin Core's secp256k1 library) through coincurve; the module owns
+  only Bee's encoding: the Ethereum signed-message digest, the 65-byte
+  `r ‖ s ‖ v` form, and the address (last 20 bytes of the public key's
+  keccak256). `Signer(key).sign(data)` / `.sign_digest(digest32)`,
+  `recover`, `recover_digest`, `verify`. It refuses to sign without
+  coincurve; recovery falls back to pure Python, which handles no secret,
+  so readers verify feed updates where coincurve cannot install
+  (Pyodide). Its signatures are byte-identical to swarm-bee's and to
+  eth-keys' pure-Python backend over 60 random keys and messages; the
+  tests pin four vectors, two of them external anchors (key 1's
+  well-known Ethereum address; the bee-js test key's address).
+  recordstore's feed pointer and ontodag's provenance records are to sign
+  with it in place of swarm-bee.
+- **`FeedOps.latest(..., after=N)` / `SwarmClient.feed_head(..., after=N)`**:
+  Bee's lookup hint, an index known to exist, so the lookup resumes near
+  the tip instead of searching from the start (cheaper, and less flaky on
+  a long feed). recordstore needed it through swarm-bee's private API.
+
+### Changed
+
+- **The `feeds` extra is coincurve instead of eth-keys.** One compiled
+  package with no dependencies of its own, where eth-keys brought ten
+  (eth-utils, cytoolz, pydantic and pydantic-core among them).
+  `FeedSigner` signs through `signer.Signer`; signatures are unchanged.
+- **Verifying a feed update needs no extra** (`verify_soc`, `FeedOps`
+  with `verify=True`): recovery falls back to pure Python.
+
 ## [0.12.0] — 2026-10-08
 
 ### Added

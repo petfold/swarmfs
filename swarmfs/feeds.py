@@ -10,8 +10,9 @@ Formats mirror bee-js exactly:
   wrapping a content chunk whose payload is timestamp(8 BE) ‖ root reference
 - SOC signature: ethereum personal-sign over keccak256(identifier ‖ cac address)
 
-Reading needs no keys; writing requires the ``feeds`` extra
-(``pip install swarmfs[feeds]``) and the feed owner's private key.
+Reading and verifying need no keys and no extra; writing requires the
+``feeds`` extra (``pip install swarmfs[feeds]``: coincurve, i.e.
+libsecp256k1) and the feed owner's private key.
 """
 
 from __future__ import annotations
@@ -63,14 +64,8 @@ def verify_soc(data: bytes, owner: bytes, address: bytes) -> None:
     and recovery of the owner from the signature over the wrapped chunk's
     BMT address — exactly what a Bee node checks on upload."""
     from .join import VerificationError
+    from .signer import SignatureError, recover_digest
 
-    try:
-        from eth_keys import keys
-    except ImportError as e:  # pragma: no cover
-        raise VerificationError(
-            "verifying feed updates requires the 'feeds' extra: "
-            "pip install 'swarmfs[feeds]'"
-        ) from e
     if len(data) < SOC_PAYLOAD_OFFSET:
         raise VerificationError(f"single-owner chunk too short: {len(data)} bytes")
     identifier = data[:SOC_IDENTIFIER_SIZE]
@@ -79,37 +74,28 @@ def verify_soc(data: bytes, owner: bytes, address: bytes) -> None:
     if soc_address(identifier, owner) != address:
         raise VerificationError("single-owner chunk does not match its address")
     digest = keccak256(identifier + chunk_address(cac))
-    prefixed = keccak256(b"\x19Ethereum Signed Message:\n32" + digest)
-    recovered = keys.Signature(
-        vrs=(
-            sig[64] - 27,
-            int.from_bytes(sig[:32], "big"),
-            int.from_bytes(sig[32:64], "big"),
-        )
-    ).recover_public_key_from_msg_hash(prefixed)
-    if recovered.to_canonical_address() != owner:
+    try:
+        recovered = recover_digest(sig, digest)
+    except SignatureError as e:
+        raise VerificationError(f"feed update signature is invalid: {e}") from e
+    if recovered != owner:
         raise VerificationError(
             "feed update signature was not made by the feed owner"
         )
 
 
 class FeedSigner:
-    """Signs feed updates with the owner's private key (eth-keys)."""
+    """Signs feed updates with the owner's private key (`signer.Signer`:
+    libsecp256k1 through coincurve, the ``feeds`` extra)."""
 
     def __init__(self, private_key: str | bytes):
-        try:
-            from eth_keys import keys
-        except ImportError as e:  # pragma: no cover
-            raise ImportError(
-                "feed writes require the 'feeds' extra: pip install 'swarmfs[feeds]'"
-            ) from e
-        if isinstance(private_key, str):
-            private_key = bytes.fromhex(private_key.removeprefix("0x"))
-        self._key = keys.PrivateKey(private_key)
+        from .signer import Signer
+
+        self._signer = Signer(private_key)
 
     @property
     def owner(self) -> bytes:
-        return self._key.public_key.to_canonical_address()
+        return self._signer.address
 
     @property
     def owner_hex(self) -> str:
@@ -117,11 +103,7 @@ class FeedSigner:
 
     def sign_digest(self, digest32: bytes) -> bytes:
         """Ethereum personal-message signature, r ‖ s ‖ v(27/28)."""
-        prefixed = keccak256(b"\x19Ethereum Signed Message:\n32" + digest32)
-        sig = self._key.sign_msg_hash(prefixed)
-        return (
-            sig.r.to_bytes(32, "big") + sig.s.to_bytes(32, "big") + bytes([sig.v + 27])
-        )
+        return self._signer.sign_digest(digest32)
 
 
 @dataclass
@@ -143,7 +125,8 @@ class FeedOps:
         self.client = client
 
     async def latest(
-        self, owner: bytes, topic: bytes, verify: bool = False
+        self, owner: bytes, topic: bytes, verify: bool = False,
+        after: int | None = None,
     ) -> FeedUpdate | None:
         """Resolve the latest update, or None for a never-written feed.
 
@@ -154,9 +137,16 @@ class FeedOps:
 
         With ``verify=True`` the SOC is fully checked client-side (address
         derivation and owner-signature recovery), so an untrusted endpoint
-        cannot forge a feed update.
+        cannot forge a feed update. ``after`` passes Bee's lookup hint (an
+        index known to exist) through to ``feed_head``.
         """
-        head = await self.client.feed_head(owner.hex(), topic.hex())
+        # `after` only when given: a client written before 0.13 has no such
+        # parameter, and an unhinted lookup must keep working with it.
+        if after is None:
+            head = await self.client.feed_head(owner.hex(), topic.hex())
+        else:
+            head = await self.client.feed_head(owner.hex(), topic.hex(),
+                                               after=after)
         if head is None:
             return None
         index_hex, next_hex = head

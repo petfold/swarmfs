@@ -409,7 +409,7 @@ nothing evicts against a dying batch.
 ## Dependency split: keccak into base (2026-08-04)
 
 - [x] `eth-hash[pycryptodome]` moved from the `feeds` extra into base
-      dependencies; the extra is now exactly `eth-keys` (feed signing +
+      dependencies; the extra is now exactly `eth-keys` (0.13: coincurve, for signing only) (feed signing +
       signature verification — the genuinely optional part, and the
       heavier transitive tree). Why: keccak became load-bearing far
       beyond feeds — chunk verification (auto-ON for gateways: a plain

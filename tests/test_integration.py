@@ -271,7 +271,7 @@ def _poll(fn, expect, timeout=90, interval=3):
 def test_bzzf_two_mounts_live():
     """v2 exit criterion on a real node: two mounts of the same bzzf:// feed
     see each other's committed changes."""
-    pytest.importorskip("eth_keys")
+    pytest.importorskip("coincurve")
     import secrets
 
     from swarmfs import SwarmFeedFileSystem
@@ -310,7 +310,7 @@ def test_bzzf_two_mounts_live():
 def test_bzzf_pinned_views_live():
     """Frozen and time-travelled mounts of a live feed (§7): the same URL,
     read as of a root or as of a moment, against a real node."""
-    pytest.importorskip("eth_keys")
+    pytest.importorskip("coincurve")
     import datetime
     import secrets
 
@@ -473,7 +473,7 @@ def test_dask_helper_live():
     pd = pytest.importorskip("pandas")
     dd = pytest.importorskip("dask.dataframe")
     pytest.importorskip("pyarrow")
-    pytest.importorskip("eth_keys")
+    pytest.importorskip("coincurve")
     import secrets
 
     import swarmfs.dask as sd
@@ -786,7 +786,7 @@ def test_act_roundtrip_live(tmp_path):
     from swarmfs.act import GranteeList
     from swarmfs.exceptions import BeeAPIError
 
-    keys = pytest.importorskip("eth_keys").keys
+    keys = pytest.importorskip("coincurve").keys
     # real curve points: Bee validates Swarm-Act-Publisher and grantee keys
     # as secp256k1 points and answers 400 "invalid public key" otherwise
     other_key = keys.PrivateKey(bytes(range(1, 33))).public_key.to_compressed_bytes().hex()

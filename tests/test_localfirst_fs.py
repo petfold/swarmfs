@@ -228,7 +228,7 @@ def test_put_blob_journals_a_one_blob_root(tmp_path):
 
 
 def test_bzzf_feed_publishes_only_after_confirmation(tmp_path):
-    pytest.importorskip("eth_keys")
+    pytest.importorskip("coincurve")
     from swarmfs.feedfs import SwarmFeedFileSystem
 
     store = {}

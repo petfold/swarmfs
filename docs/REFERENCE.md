@@ -8,7 +8,7 @@ local-first design in [localstore-design.md](localstore-design.md) and its
 Tables here are pinned against the code by `tests/test_reference.py` — if a
 name or parameter in this file and the code disagree, the suite fails.
 
-Package version this file describes: `0.12.0`.
+Package version this file describes: `0.13.0`.
 
 ## 1. Vocabulary
 
@@ -31,7 +31,7 @@ Package version this file describes: `0.12.0`.
 | command | gives |
 |---|---|
 | `pip install swarmfs` | `bzz://`, local-first, chunk verification, offline BMT addressing, encryption — runtime deps: `fsspec`, `aiohttp`, `eth-hash[pycryptodome]` (keccak moved into base in 0.9; before that a plain install crashed on first verified/gateway read) |
-| `pip install "swarmfs[feeds]"` | feed **signing** (`bzzf://` writes) and signature *verification* — the two things needing `eth-keys`; reading feeds works from the base install |
+| `pip install "swarmfs[feeds]"` | feed **signing** (`bzzf://` writes): coincurve, i.e. libsecp256k1. Reading feeds and *verifying* their signatures work from the base install (recovery falls back to pure Python, which handles no secret) |
 | `pip install "swarmfs[fuse]"` | the `swarmfs mount` command / `swarmfs.fuse` (fusepy); also needs a system libfuse **2** (`libfuse2`/`libfuse2t64`, macFUSE) |
 
 ## 3. Exports
@@ -202,20 +202,26 @@ source) — node claims alone promote no further than *pushed*.
 
 The single-owner-chunk / feed primitives behind `bzzf://` — a supported
 surface: swarmlite builds its snapshot history and publish path on it
-(needs the `feeds` extra).
+(writing needs the `feeds` extra; reading and verifying do not).
 
 | name | signature | semantics |
 |---|---|---|
-| `feeds.FeedSigner` | `(private_key)` | the owner's key; signs feed updates (`.owner` / `.owner_hex`). |
-| `feeds.FeedOps` | `(client)` | feed operations over a `SwarmClient` — `update(signer, topic, index, ref, stamp)` publishes one signed update and returns its timestamp; `latest(owner, topic, verify=False)` resolves the head; `at_index(owner, topic, index, verify=False)` an update by sequence index (no lookup: the address is derived); `at(owner, topic, when, verify=False)` the update in force at a unix time — a client-side binary search over `/chunks`, because Bee ignores `?at=` on sequence feeds. |
+| `feeds.FeedSigner` | `(private_key)` | the owner's key; signs feed updates (`.owner` / `.owner_hex`), through `signer.Signer`. |
+| `feeds.FeedOps` | `(client)` | feed operations over a `SwarmClient` — `update(signer, topic, index, ref, stamp)` publishes one signed update and returns its timestamp; `latest(owner, topic, verify=False, after=None)` resolves the head (`after`: Bee's lookup hint, an index known to exist, so the lookup resumes there); `at_index(owner, topic, index, verify=False)` an update by sequence index (no lookup: the address is derived); `at(owner, topic, when, verify=False)` the update in force at a unix time — a client-side binary search over `/chunks`, because Bee ignores `?at=` on sequence feeds. |
 | `feeds.FeedUpdate` | `(reference, index, next_index, timestamp=None)` | one resolved update; `timestamp` is the publication time from the bee-js payload (None for formats that carry none). |
 | `feeds.owner_bytes` | `(owner)` | 40-hex owner address → bytes (0x tolerated). |
 | `feeds.topic_bytes` | `(topic)` | human topic string (keccak'd, bee-js convention) or raw 64-hex → bytes. |
 | `feeds.feed_identifier` | `(topic, index)` | the SOC identifier of update `index` of a sequence feed. |
 | `feeds.soc_address` | `(identifier, owner)` | the address the single-owner chunk lives at. |
-| `feeds.verify_soc` | `(data, owner, address)` | full SOC verification: address recomputation + owner-signature recovery; raises `FeedError`. |
+| `feeds.verify_soc` | `(data, owner, address)` | full SOC verification: address recomputation + owner-signature recovery; raises `VerificationError`. Needs no extra. |
 | `feeds.SOC_PAYLOAD_OFFSET` | constant (`105`) | where the payload starts inside a raw SOC. |
 | `feeds.FeedError` | exception (`RuntimeError`) | malformed/misowned feed data, missing signer, bad SOC. |
+| `signer.Signer` | `(private_key)` | a secp256k1 key (32 bytes or 64 hex, `0x` tolerated) signing the way Bee checks: `sign(data)` → 65-byte `r ‖ s ‖ v` (v 27/28) over the Ethereum signed-message digest of `keccak256(data)`; `sign_digest(digest32)` the same over a given digest; `.address` / `.address_hex`, `.public_key`. The cryptography is libsecp256k1's (coincurve, the `feeds` extra); without coincurve it refuses rather than sign in pure Python. |
+| `signer.recover` | `(signature, data)` | the 20-byte address that signed `data`; `recover_digest(signature, digest32)` for a given digest. Falls back to pure Python without coincurve (no secret involved). Raises `SignatureError`. |
+| `signer.verify` | `(signature, data, address)` | True iff `address` signed `data`. |
+| `signer.address_of` | `(public_key)` | 20-byte address of a public key: the last 20 bytes of its keccak256. |
+| `signer.message_digest` | `(digest32)` | the 32 bytes actually signed: `keccak256("\x19Ethereum Signed Message:\n32" ‖ digest32)`. |
+| `signer.SignatureError` | exception (`ValueError`) | a signature that is malformed or recovers no key. |
 
 ## 10. Errors
 

@@ -531,14 +531,19 @@ class SwarmClient:
 
     # ------------------------------------------------------------ feeds/SOC
 
-    async def feed_head(self, owner: str, topic: str) -> tuple[str, str] | None:
+    async def feed_head(self, owner: str, topic: str,
+                        after: int | None = None) -> tuple[str, str] | None:
         """Current (index, next index) of a sequence feed, as hex strings from
         the Swarm-Feed-Index headers; None if the feed has no updates yet.
 
         Sends Swarm-Only-Root-Chunk so Bee doesn't stream the resolved
-        content — only the headers matter here.
+        content — only the headers matter here. ``after`` is Bee's hint: an
+        index known to exist, so the lookup resumes there instead of
+        searching from the start (cheaper, and less flaky on a long feed).
         """
         url = f"{self.api_url}/feeds/{owner}/{topic}?type=sequence"
+        if after is not None:
+            url += f"&after={int(after)}"
         session = await self._get_session()
         async with session.get(url, headers={"Swarm-Only-Root-Chunk": "true"}) as resp:
             if resp.status == 404:

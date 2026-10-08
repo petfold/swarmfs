@@ -196,7 +196,7 @@ def test_raw_reference_reads_treat_the_ref_as_a_root():
 
 
 def test_bzzf_feed_over_protected_roots(tmp_path):
-    pytest.importorskip("eth_keys")
+    pytest.importorskip("coincurve")
     from swarmfs import SwarmFeedFileSystem
     from swarmfs.feeds import FeedSigner
 

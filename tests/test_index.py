@@ -249,7 +249,7 @@ def test_an_index_we_do_not_understand_is_ignored(manifest):
 
 
 def test_index_survives_the_feed_and_the_dask_helper(manifest):
-    pytest.importorskip("eth_keys")
+    pytest.importorskip("coincurve")
     from swarmfs.feedfs import SwarmFeedFileSystem
     from swarmfs.feeds import FeedSigner
 

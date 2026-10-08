@@ -136,7 +136,7 @@ def test_live_bzzf_over_encrypted_root(tmp_path):
     """A feed can point at an encrypted root: the update carries the full
     128-hex reference, so readers of the stable URL get decryption
     transparently — settled live 2026-08-04."""
-    pytest.importorskip("eth_keys")
+    pytest.importorskip("coincurve")
     import time
 
     from swarmfs.feedfs import SwarmFeedFileSystem

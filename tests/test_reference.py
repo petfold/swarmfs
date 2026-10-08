@@ -68,7 +68,7 @@ API_SECTIONS = [
 
 def _resolve(dotted: str):
     parts = dotted.split(".")
-    if parts[0] in ("localstore", "localsync", "stamps", "feeds", "fuse",
+    if parts[0] in ("localstore", "localsync", "stamps", "feeds", "signer", "fuse",
                     "cli", "act", "dask"):
         obj = importlib.import_module(f"swarmfs.{parts[0]}")
         parts = parts[1:]

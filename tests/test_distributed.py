@@ -275,7 +275,7 @@ def test_link_into_act_protected_lineage(manifest):
 
 
 def test_link_into_feed_requires_the_signer(manifest):
-    pytest.importorskip("eth_keys")
+    pytest.importorskip("coincurve")
     from swarmfs.feedfs import SwarmFeedFileSystem
     from swarmfs.feeds import FeedError
 

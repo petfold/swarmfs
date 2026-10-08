@@ -192,7 +192,7 @@ class FakeClient:
         for i in range(0, len(data), chunk_size):
             yield data[i : i + chunk_size]
 
-    async def feed_head(self, owner: str, topic: str) -> tuple[str, str] | None:
+    async def feed_head(self, owner: str, topic: str, after=None) -> tuple[str, str] | None:
         """Emulate Bee's sequence lookup: scan indexes from 0 until a gap."""
         from swarmfs.feeds import feed_identifier, soc_address
 
@@ -218,24 +218,15 @@ class FakeClient:
         """Store a single-owner chunk, verifying the signature the way Bee
         does: recover the signer from the personal-sign digest over
         keccak256(identifier + wrapped chunk address)."""
-        from eth_keys import keys
-
         from swarmfs.bmt import chunk_address, keccak256
         from swarmfs.feeds import soc_address
+        from swarmfs.signer import recover_digest
 
         ob = bytes.fromhex(owner)
         ib = bytes.fromhex(identifier)
         sig = bytes.fromhex(signature)
         digest = keccak256(ib + chunk_address(data))
-        prefixed = keccak256(b"\x19Ethereum Signed Message:\n32" + digest)
-        recovered = keys.Signature(
-            vrs=(
-                sig[64] - 27,
-                int.from_bytes(sig[:32], "big"),
-                int.from_bytes(sig[32:64], "big"),
-            )
-        ).recover_public_key_from_msg_hash(prefixed)
-        assert recovered.to_canonical_address() == ob, "SOC signature does not match owner"
+        assert recover_digest(sig, digest) == ob, "SOC signature does not match owner"
 
         addr = soc_address(ib, ob)
         self.store[addr] = ib + sig + data  # SOC chunk data layout
