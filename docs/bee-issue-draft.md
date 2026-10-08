@@ -1,4 +1,6 @@
-# Draft comment for ethersphere/bee#5400 (not posted)
+# Comment on ethersphere/bee#5400 (posted 2026-10-08)
+
+Posted as https://github.com/ethersphere/bee/issues/5400#issuecomment-6064777994
 
 Our report turned out to be a duplicate of
 https://github.com/ethersphere/bee/issues/5400 ("Research Review: Pushsync
@@ -7,7 +9,7 @@ on 2026-04-30; the proposed fix is PR #5390). So instead of a new issue,
 this adds our two occurrences as field evidence, plus one point #5390 does
 not cover. Evidence is in `bee-push-sync-findings.md` and
 `bee-push-sync-evidence/`; the source references were checked at `v2.8.2`
-(2026-10-08). Peter posts it.
+(2026-10-08).
 
 ---
 

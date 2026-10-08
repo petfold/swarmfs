@@ -18,8 +18,8 @@ pattern, not a one-off.
 bug, confirmed on mainnet by a maintainer on 2026-04-30 ("the shallow
 receipts are silently silenced and accepted, meaning the chunk gets synced
 to the wrong neighborhood"); PR #5390 (open) is the proposed fix. So no new
-issue: `bee-issue-draft.md` is now a comment for #5400 adding our two
-occurrences as field evidence. The next section records what reading
+issue: our two occurrences went to #5400 as a comment (posted 2026-10-08,
+`bee-issue-draft.md`). The next section records what reading
 Bee's source changed in this document's claims.
 
 **Observed on:** Bee `2.8.2-7e703f49`, API `8.1.1`, **light node**, Gnosis mainnet,
