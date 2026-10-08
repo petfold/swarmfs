@@ -8,7 +8,7 @@ local-first design in [localstore-design.md](localstore-design.md) and its
 Tables here are pinned against the code by `tests/test_reference.py` — if a
 name or parameter in this file and the code disagree, the suite fails.
 
-Package version this file describes: `0.13.0`.
+Package version this file describes: `0.14.0`.
 
 ## 1. Vocabulary
 
@@ -216,9 +216,12 @@ surface: swarmlite builds its snapshot history and publish path on it
 | `feeds.verify_soc` | `(data, owner, address)` | full SOC verification: address recomputation + owner-signature recovery; raises `VerificationError`. Needs no extra. |
 | `feeds.SOC_PAYLOAD_OFFSET` | constant (`105`) | where the payload starts inside a raw SOC. |
 | `feeds.FeedError` | exception (`RuntimeError`) | malformed/misowned feed data, missing signer, bad SOC. |
-| `signer.Signer` | `(private_key)` | a secp256k1 key (32 bytes or 64 hex, `0x` tolerated) signing the way Bee checks: `sign(data)` → 65-byte `r ‖ s ‖ v` (v 27/28) over the Ethereum signed-message digest of `keccak256(data)`; `sign_digest(digest32)` the same over a given digest; `.address` / `.address_hex`, `.public_key`. The cryptography is libsecp256k1's (coincurve, the `feeds` extra); without coincurve it refuses rather than sign in pure Python. |
+| `signer.Signer` | `(private_key)` | a secp256k1 key (32 bytes or 64 hex, `0x` tolerated) signing the way Bee checks: `sign(data)` → 65-byte `r ‖ s ‖ v` (v 27/28) over the Ethereum signed-message digest of `keccak256(data)`; `sign_digest(digest32)` the same over a given digest; `sign_hash(hash32)` over a 32-byte hash as given, with no prefix (eth-keys' `sign_msg_hash`; only for hashes made under the caller's own domain separation); `.address` / `.address_hex`, `.public_key`. The cryptography is libsecp256k1's (coincurve, the `feeds` extra); without coincurve it refuses rather than sign in pure Python. |
 | `signer.recover` | `(signature, data)` | the 20-byte address that signed `data`; `recover_digest(signature, digest32)` for a given digest. Falls back to pure Python without coincurve (no secret involved). Raises `SignatureError`. |
 | `signer.verify` | `(signature, data, address)` | True iff `address` signed `data`. |
+| `signer.recover_hash` | `(signature, hash32)` | the 20-byte address that signed `hash32` itself (no prefix); `recover_hash_key(signature, hash32)` the 65-byte uncompressed public key. `v` may be 0/1 or 27/28. Pure-Python fallback as `recover`. |
+| `signer.checksum_address` | `(address)` | `0x` + a 20-byte address in EIP-55 mixed case. |
+| `signer.compressed` | `(public_key)` | the 33-byte compressed form of an uncompressed public key. |
 | `signer.address_of` | `(public_key)` | 20-byte address of a public key: the last 20 bytes of its keccak256. |
 | `signer.message_digest` | `(digest32)` | the 32 bytes actually signed: `keccak256("\x19Ethereum Signed Message:\n32" ‖ digest32)`. |
 | `signer.SignatureError` | exception (`ValueError`) | a signature that is malformed or recovers no key. |

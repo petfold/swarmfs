@@ -12,6 +12,21 @@ claiming more detail than the history holds.
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-10-08
+
+### Added
+
+- **`swarmfs.signer` signs and recovers a hash as given**, for
+  applications that hash under their own domain separation:
+  `Signer.sign_hash(hash32)` (eth-keys' `sign_msg_hash`, no Ethereum
+  prefix), `recover_hash(signature, hash32)` and `recover_hash_key` (the
+  public key), with the same pure-Python recovery fallback; plus
+  `checksum_address` (EIP-55) and `compressed` (a 33-byte public key).
+  loopmarket's offer signatures, contact cards and door witnesses move onto
+  it from eth-keys; the tests pin eth-keys' own outputs and EIP-55's
+  examples. `sign_digest` is now `sign_hash` over the prefixed digest, so
+  Bee's form is unchanged byte for byte.
+
 ## [0.13.0] — 2026-10-08
 
 ### Added

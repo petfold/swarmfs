@@ -9,7 +9,12 @@ This module owns only the encoding around them:
   digest32)``, where ``digest32`` is ``keccak256(data)`` — for a feed
   update, ``data`` is ``identifier ‖ wrapped-chunk address``;
 - the 65-byte wire form ``r ‖ s ‖ v`` with ``v`` in ``{27, 28}``;
-- an address: the last 20 bytes of ``keccak256`` of the 64-byte public key.
+- an address: the last 20 bytes of ``keccak256`` of the 64-byte public key,
+  written with EIP-55 mixed-case checksum by `checksum_address`.
+
+`Signer.sign_hash` and `recover_hash` sign and recover a 32-byte hash as
+given, with no prefix (eth-keys' ``sign_msg_hash``), for applications that
+hash under their own domain separation, such as loopmarket's offer ids.
 
 Signing never falls back: without coincurve it refuses, naming the pip
 command, because a pure-Python signer handles the private key in code that
@@ -59,6 +64,27 @@ def address_of(public_key: bytes) -> bytes:
     return keccak256(public_key)[-20:]
 
 
+def checksum_address(address: bytes) -> str:
+    """``0x`` and the 20-byte address in EIP-55 mixed case: a hex letter is
+    upper case where the matching nibble of the lower-case hex's keccak256
+    is 8 or more."""
+    if len(address) != 20:
+        raise ValueError("an address is 20 bytes")
+    hexed = bytes(address).hex()
+    nibbles = keccak256(hexed.encode("ascii")).hex()
+    return "0x" + "".join(c.upper() if int(n, 16) >= 8 else c
+                          for c, n in zip(hexed, nibbles))
+
+
+def compressed(public_key: bytes) -> bytes:
+    """The 33-byte compressed form of an uncompressed public key."""
+    if len(public_key) == 65 and public_key[0] == 4:
+        public_key = public_key[1:]
+    if len(public_key) != 64:
+        raise ValueError("expected an uncompressed public key")
+    return bytes([2 + (public_key[63] & 1)]) + public_key[:32]
+
+
 def _private_bytes(private_key) -> bytes:
     if isinstance(private_key, str):
         private_key = bytes.fromhex(private_key.lower().removeprefix("0x"))
@@ -82,7 +108,18 @@ class Signer:
     def sign_digest(self, digest32: bytes) -> bytes:
         """65-byte ``r ‖ s ‖ v`` over the signed-message digest of
         ``digest32``."""
-        sig = self._key.sign_recoverable(message_digest(digest32), hasher=None)
+        return self.sign_hash(message_digest(digest32))
+
+    def sign_hash(self, hash32: bytes) -> bytes:
+        """65-byte ``r ‖ s ‖ v`` over ``hash32`` itself, with no prefix.
+
+        Only for a hash the caller computes under its own domain
+        separation: Bee and Ethereum check `sign_digest`'s form, and the
+        prefix there is what stops a signature being replayed as something
+        else."""
+        if len(hash32) != 32:
+            raise ValueError(f"expected a 32-byte hash, got {len(hash32)}")
+        sig = self._key.sign_recoverable(bytes(hash32), hasher=None)
         return sig[:64] + bytes([sig[64] + 27])
 
     def sign(self, data: bytes) -> bytes:
@@ -101,24 +138,34 @@ def _split(signature: bytes):
     return signature[:32], signature[32:64], recid
 
 
-def recover_digest(signature: bytes, digest32: bytes) -> bytes:
-    """The 20-byte address whose key made ``signature`` over the
-    signed-message digest of ``digest32``. Raises ``SignatureError``."""
+def recover_hash_key(signature: bytes, hash32: bytes) -> bytes:
+    """The 65-byte uncompressed public key whose key made ``signature``
+    over ``hash32`` itself (no prefix). Raises ``SignatureError``."""
+    if len(hash32) != 32:
+        raise ValueError(f"expected a 32-byte hash, got {len(hash32)}")
     r, s, recid = _split(signature)
-    h = message_digest(digest32)
     try:
         coincurve = _coincurve()
     except ImportError:
-        public = _py_recover(int.from_bytes(r, "big"),
-                             int.from_bytes(s, "big"), recid, h)
-    else:
-        try:
-            public = coincurve.PublicKey.from_signature_and_message(
-                r + s + bytes([recid]), h, hasher=None
-            ).format(compressed=False)
-        except Exception as e:
-            raise SignatureError(f"signature recovers no key: {e}") from e
-    return address_of(public)
+        return _py_recover(int.from_bytes(r, "big"),
+                           int.from_bytes(s, "big"), recid, bytes(hash32))
+    try:
+        return coincurve.PublicKey.from_signature_and_message(
+            r + s + bytes([recid]), bytes(hash32), hasher=None
+        ).format(compressed=False)
+    except Exception as e:
+        raise SignatureError(f"signature recovers no key: {e}") from e
+
+
+def recover_hash(signature: bytes, hash32: bytes) -> bytes:
+    """The 20-byte address that signed ``hash32`` itself (no prefix)."""
+    return address_of(recover_hash_key(signature, hash32))
+
+
+def recover_digest(signature: bytes, digest32: bytes) -> bytes:
+    """The 20-byte address whose key made ``signature`` over the
+    signed-message digest of ``digest32``. Raises ``SignatureError``."""
+    return recover_hash(signature, message_digest(digest32))
 
 
 def recover(signature: bytes, data: bytes) -> bytes:
