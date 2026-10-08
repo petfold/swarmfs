@@ -11,10 +11,60 @@ see `topology-and-buckets-summary.json`, and regenerate the originals with
 data-loss claim could not be reproduced with a plain HTTP upload — see the
 negative-result section below. **It happened again on 2026-10-07** (next
 section), with the same node software and the same signature, so it is a
-pattern, not a one-off; the draft issue is `bee-issue-draft.md`.
+pattern, not a one-off.
+
+**Already known upstream (found 2026-10-08):** ethersphere/bee#5400,
+"Research Review: Pushsync Silent Chunk Loss" (open since 2026-03), is this
+bug, confirmed on mainnet by a maintainer on 2026-04-30 ("the shallow
+receipts are silently silenced and accepted, meaning the chunk gets synced
+to the wrong neighborhood"); PR #5390 (open) is the proposed fix. So no new
+issue: `bee-issue-draft.md` is now a comment for #5400 adding our two
+occurrences as field evidence. The next section records what reading
+Bee's source changed in this document's claims.
 
 **Observed on:** Bee `2.8.2-7e703f49`, API `8.1.1`, **light node**, Gnosis mainnet,
 via Swarm Desktop. 2026-09-11, ~03:00-03:30 UTC.
+
+## Checked against Bee v2.8.2's source (2026-10-08)
+
+Read at tag `v2.8.2` (7e703f49). What held, and what did not:
+
+- **Held: an exhausted shallow-receipt retry is recorded as success.**
+  `DefaultRetryCount = 6` (`pkg/pusher/pusher.go:68`); `attempts.try`
+  (`pkg/pusher/inflight.go:58-65`) allows five requeues, and on the sixth
+  shallow receipt the deferred path reports `storage.ChunkSynced`
+  (`pusher.go:282-289`), which marks the tag synced and deletes the local
+  upload copy; the direct path swallows the error ("out of attempts for
+  retry, swallow error", `pusher.go:336-341`).
+- **Wrong as evidence: `to_push == synced`.** `TotalSynced.Inc()` runs on
+  every push *attempt*, failed ones included (`pusher.go:178-179`), and
+  `TotalToPush` once per attempt (`:154`), so the two are equal whenever
+  nothing is in flight. They prove nothing about delivery (the help text
+  "with valid receipts" is wrong), and they count attempts, retries
+  included, not chunks. PR #5390 adds `total_could_not_sync` but leaves
+  that increment as it is.
+- **What the counters do show:** each shallow receipt increments
+  `shallow_receipt`, and `total_errors` too except on the sixth; other
+  errors increment `total_errors` alone. So `shallow_receipt -
+  total_errors` is a lower bound on chunks whose retries ran out: at
+  least 471 on 2026-10-07 (one node process), 248 on 2026-09-11 if its
+  counters covered one process too.
+- **Overstated: depth 0.** The label is the proximity of the storer that
+  *signed* the receipt to the chunk (`pkg/pushsync/pushsync.go:593,606`;
+  forwarders pass receipts back unchanged), not a default value. So a
+  depth-0 receipt means at least one copy was stored as far from its
+  neighbourhood as possible. It does not show the chunk was never
+  forwarded towards it: a forwarder that finds no closer peer (overdraft
+  skips count) stores it itself ("want self", #5237), and the origin
+  returns on the first shallow receipt while parallel pushes still run
+  (`pushsync.go:503-505`, `:539`), so another copy may have arrived.
+- **Stewardship:** `GET` walks the whole tree with network-only
+  retrieval, so a `false` can be transient (32 peer attempts of up to
+  30 s); retrieval moves only towards closer peers, so a copy stored at
+  proximity 0 is practically unreachable. `PUT` re-stamps and pushes
+  every chunk directly (hence the batch header, reusing the existing
+  bucket indices); any fetch or push error is the opaque 500, typical
+  after a deferred upload deleted the local copies.
 
 ## Second occurrence, 2026-10-07
 
@@ -45,20 +95,24 @@ fixed them (200, retrievable on the next check;
 
 Two things this run adds:
 
-1. **Depth-0 receipts.** 14,854 shallow receipts came from peers at
-   proximity 0 to the chunk: peers sharing no address prefix with it,
-   as far from its neighbourhood as a peer can be. A receipt from there
-   can only mean the chunk was not forwarded towards its neighbourhood.
+1. **Depth-0 receipts.** 14,854 shallow receipts were signed by storers
+   at proximity 0 to the chunk: peers sharing no address prefix with it,
+   as far from its neighbourhood as a peer can be. So at least one copy
+   was stored there. (First written as "the chunk was not forwarded
+   towards its neighbourhood", which the source does not support; see
+   the section above.)
 2. **Replicas did not prevent it.** Bee 2.8.2 uploads at redundancy level
    MEDIUM when no `Swarm-Redundancy-Level` header is sent
    (`redundancy.DefaultUploadLevel`; the uploads here sent none), so every
    blob's root chunk also went up as 2 dispersed replicas. Those travel by
    the same push-sync, and the roots were still unretrievable.
 
-The client side now repairs instead of waiting: swarmfs's `Syncer` and
-recordstore's `BeeBytesStore.confirm()` check what they uploaded with
-`GET /stewardship` and push only the missing blobs again (directly, or
-with `PUT /stewardship`). That makes our data safe; it does not make the
+The client side now repairs instead of waiting: swarmfs's `Syncer` (since
+0.11.2) checks what it uploaded with `GET /stewardship` and pushes only the
+missing blobs again (directly, or with `PUT /stewardship`). (A second copy
+of that repair, recordstore's `BeeBytesStore.confirm()`, was written and
+reverted the same night: one place is enough, and recordstore reaches Bee
+through swarmfs since 0.22.0.) That makes our data safe; it does not make the
 node honest about what it delivered, which is what the issue asks for.
 
 ## Summary (September)

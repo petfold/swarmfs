@@ -1,94 +1,64 @@
-# Draft issue for ethersphere/bee (not filed)
+# Draft comment for ethersphere/bee#5400 (not posted)
 
-To file at https://github.com/ethersphere/bee/issues once Peter agrees.
-Evidence for everything below is in `bee-push-sync-findings.md` and
-`bee-push-sync-evidence/`.
+Our report turned out to be a duplicate of
+https://github.com/ethersphere/bee/issues/5400 ("Research Review: Pushsync
+Silent Chunk Loss", open since 2026-03, confirmed on mainnet by a maintainer
+on 2026-04-30; the proposed fix is PR #5390). So instead of a new issue,
+this adds our two occurrences as field evidence, plus one point #5390 does
+not cover. Evidence is in `bee-push-sync-findings.md` and
+`bee-push-sync-evidence/`; the source references were checked at `v2.8.2`
+(2026-10-08). Peter posts it.
 
 ---
 
-**Title:** Light node reports uploads fully synced while chunks are unretrievable (shallow receipts counted as synced)
+A data point from outside the team, in case it helps #5390: a Bee 2.8.2
+light node (Swarm Desktop, behind NAT, Gnosis mainnet, ~140 peers) lost
+content this way twice, a month apart.
 
-### Summary
+Each time we published eleven content trees in one burst (deferred
+`POST /bytes`, default redundancy, an immutable batch with no full bucket
+and no invalid stamps). Every upload returned success and the pusher
+drained, yet afterwards 2 of the 11 root chunks (2026-09-11) and 3 of 11
+(2026-10-07) were not retrievable: `GET /stewardship` said false,
+repeatedly. Pushing them again fixed them (in September only after two
+or three attempts).
 
-On a light node, a burst of uploads finishes with the pusher queue fully
-drained (`bee_pusher_total_to_push == bee_pusher_total_synced`) and every
-upload accepted, yet some of the uploaded content is not retrievable from
-the network afterwards, and stays that way. In both runs about 10% of
-pushes got a shallow receipt, and the shallow-receipt count tracks
-`bee_pusher_total_errors` almost one-for-one. Nothing in the node's API
-distinguishes those chunks from delivered ones. We have seen this twice,
-a month apart, on the same node.
-
-### Environment
-
-- Bee `2.8.2-7e703f49`, API `8.1.1`, light node, Gnosis mainnet, run by
-  Swarm Desktop; `reachability: Private` (NAT), ~138 connected peers.
-- Immutable postage batch, usable, no bucket full (fullest bucket 13/16 in
-  September, 24/64 in October), no `overissued` errors,
-  `bee_pushsync_invalid_stamps 0`.
-- Uploads: `POST /bytes`, deferred, no `Swarm-Redundancy-Level` header (so
-  the default MEDIUM applies), several thousand single-chunk blobs per
-  content tree, eleven trees per run.
-
-### What happened
+(September's counters are a snapshot taken during the run's tail, with 128
+pushes still in flight; October's were taken after the queue drained.)
 
 | | 2026-09-11 | 2026-10-07 |
 |---|---|---|
-| chunks pushed (`total_to_push` = `total_synced`) | 322,161 | 372,313 |
+| `bee_pusher_total_to_push` / `total_synced` | 322,161 / 322,033 | 372,313 / 372,313 |
 | `bee_pusher_total_errors` | 29,354 | 36,118 |
 | `bee_pushsync_shallow_receipt` | 29,602 | 36,589 |
-| roots not retrievable afterwards (of 11) | 2 | 3 |
-| repair | re-uploading from source, 2–3 times, then `PUT /stewardship` | `PUT /stewardship` once each |
+| of which `shallow_receipt_depth{depth="0"}` | 11,777 | 14,854 |
 
-"Not retrievable" means `GET /stewardship/<root>` returned
-`isRetrievable: false`, checked repeatedly after the pusher had drained,
-with no backlog left in the pusher.
+Reading v2.8.2 against those counters:
 
-On 2026-10-07, 14,854 of the shallow receipts were at depth 0
-(`bee_pushsync_shallow_receipt_depth{depth="0"}`), i.e. from peers sharing
-no address prefix with the chunk. The receipt-depth histogram for the same
-run peaks at depth 9 (156,150) and 10 (84,911); `GET /topology` reports
-depth 9.
+1. A shallow receipt increments `total_errors` except on the sixth
+   attempt, which reports the chunk `ChunkSynced`
+   (`pkg/pusher/pusher.go:282-289`, `pkg/pusher/inflight.go:58-65`); other
+   errors increment `total_errors` alone. So `shallow_receipt -
+   total_errors` is a lower bound on chunks accepted after six shallow
+   receipts: at least 471 on 2026-10-07 (one node process), and 248 on
+   2026-09-11 if those counters also covered one process.
+2. 11,777 (September) and 14,854 (October) of the shallow receipts were
+   signed by storers at proximity 0 to the chunk (`pkg/pushsync/pushsync.go:593,606`): copies
+   stored as far from their neighbourhood as possible, which fits the
+   out-of-AOR storing discussed here and in #5237.
+3. `total_synced` increments on every push attempt, failed ones included
+   (`pkg/pusher/pusher.go:178-179`), so `total_to_push == total_synced`
+   only means that nothing is in flight. Its help text says "with valid
+   receipts". #5390 adds `total_could_not_sync`, but as far as we can see
+   it leaves this increment unconditional, so the counter would still
+   overstate delivery. For us it was the misleading signal: we read the
+   drained queue as "delivered".
 
-### Expected
+Separately: in September `PUT /stewardship/<ref>` answered
+`500 {"message":"re-upload failed"}` for content whose deferred upload had
+already deleted the local copies, and the message cannot tell "not held
+locally" from "re-push failed". That may deserve its own small issue.
 
-Either the chunk is pushed again until a receipt comes from its
-neighbourhood (with bounded retries), or, once retries are exhausted, the
-chunk is reported as not delivered: not counted in `total_synced`, and
-visible per upload (per tag) so a client can tell "stored by its
-neighbourhood" from "handed to a peer that is not its storer".
-
-### Why it matters
-
-An application cannot tell from Bee that its data did not land. The HTTP
-upload succeeded, the pusher says done, and other nodes cannot retrieve
-the content; the uploader's light node holds it only until it evicts it.
-`GET /stewardship/<ref>` per reference is the only way to find out, and it
-is slow for large content (we measured 291 s for a 4 MB upload). Clients
-now have to verify every reference themselves and re-push what is missing
-(we do this now in our own client libraries).
-
-The default MEDIUM redundancy did not prevent the loss: the root chunks'
-dispersed replicas go through the same push-sync.
-
-### What we could not reproduce
-
-Pushing random bytes straight to `POST /bytes` (2 KB to 16 MB, outside our
-client) never lost data. The loss appeared only in the eleven-tree bursts
-of 250k–370k chunks. It may need that scale or rate; we have no minimal
-reproduction. We can share full metrics, the topology summary, the stamp
-bucket summary and logs from both runs.
-
-### Questions
-
-1. After a shallow receipt, how many retries does the pusher make, and
-   what does it record when they are exhausted? From outside, the chunk
-   appears in `total_synced`.
-2. How can a light node get a receipt from a peer at proximity 0 to the
-   chunk? That looks as if the chunk was not forwarded towards its
-   neighbourhood at all.
-3. `PUT /stewardship/<ref>` returned `500 {"message":"re-upload failed"}` in
-   September while the node no longer held the chunks locally. Could it
-   say why ("not held locally" vs "re-upload attempted and failed")? It
-   also requires `swarm-postage-batch-id` to re-transmit already-stamped
-   content, which surprised us.
+On our side we now check every reference with `GET /stewardship` after
+uploading and push again what is missing. We can share the full metrics
+and logs from both runs.
