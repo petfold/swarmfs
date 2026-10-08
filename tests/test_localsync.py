@@ -325,7 +325,9 @@ def test_concurrent_checks_still_repair_only_the_missing(store):
     datas = [bytes([i]) * 20 for i in range(30)]
     refs = [store.address(d) for d in datas]
     remote.lose = {refs[3], refs[17], refs[29]}
-    policy = fast_policy(confirm_sample=0.25, check_concurrency=8)
+    # every blob checked: a sample of 16 of these 30 misses all three
+    # losses about one time in eleven, which made this test flaky
+    policy = fast_policy(confirm_sample=1.0, check_concurrency=8)
     with Syncer(store, remote, policy) as syncer:
         root, _ = commit_blobs(store, *datas)
         syncer.sync(timeout=WAIT)

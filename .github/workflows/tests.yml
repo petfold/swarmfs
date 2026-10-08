@@ -43,7 +43,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: pip install -e . pytest "eth-keys>=0.4"
+      - run: pip install -e . pytest "coincurve>=19"
           "eth-hash[pycryptodome]>=0.5" "fsspec==2024.2.0"
       # A deliberately minimal environment — no [test] extra — so it collects
       # fewer tests than the matrix above. The README count guard describes the
