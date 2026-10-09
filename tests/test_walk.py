@@ -10,7 +10,7 @@ import random
 
 from swarmfs.mantaray import Node, NodeStore, add, iter_files, list_directory, locate, save
 
-from conftest import FILES, METADATA, build_manifest
+from conftest import FILES, METADATA
 
 
 def make_store(store: dict[bytes, bytes]) -> NodeStore:

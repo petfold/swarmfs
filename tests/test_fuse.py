@@ -11,6 +11,7 @@ sync wrappers → Mantaray walk is exercised without a Bee node.
 from __future__ import annotations
 
 import errno
+import importlib
 import os
 import shutil
 import stat
@@ -115,7 +116,7 @@ def test_cli_entry_points(capsys):
 
 def _fuse_unavailable() -> str | None:
     try:
-        import fuse  # noqa: F401
+        importlib.import_module("fuse")
     except ImportError:
         return "fusepy not installed (pip install 'swarmfs[fuse]')"
     except OSError as e:  # fusepy: EnvironmentError('Unable to find libfuse')

@@ -12,15 +12,13 @@ against a trusted node; the verifying reader refuses ciphertext loudly
 (encrypted refs are not content addresses).
 """
 
-import hashlib
 import os
 
 import pytest
 
-from conftest import GOOD_STAMP, FakeClient
+from conftest import FakeClient
 
 from swarmfs import SwarmFileSystem
-from swarmfs.core import CommitEngine
 from swarmfs.join import VerificationError, VerifyingReader
 from swarmfs.mantaray import unmarshal
 

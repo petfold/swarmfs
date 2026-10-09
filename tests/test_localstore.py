@@ -8,7 +8,6 @@ acceptance criterion is that any truncation leaves the journal
 *under-claiming* durability, never over-claiming it.
 """
 
-import json
 import os
 import random
 import shutil

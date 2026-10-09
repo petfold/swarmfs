@@ -14,7 +14,7 @@ import pytest
 
 pytest.importorskip("eth_hash")
 
-from conftest import GOOD_STAMP, BMTFakeClient, FakeClient  # noqa: E402
+from conftest import BMTFakeClient  # noqa: E402
 
 from swarmfs.commit import (LocalFirstCommitEngine, StagedLink,  # noqa: E402
                             StagedWrite)

@@ -10,7 +10,6 @@ the filesystem sends the headers on root references only.
 
 from __future__ import annotations
 
-import warnings
 
 import pytest
 

@@ -8,7 +8,7 @@ import pytest
 from swarmfs import SwarmFileSystem
 from swarmfs.stamps import StampError
 
-from conftest import FILES, FakeClient, build_manifest
+from conftest import FILES, FakeClient
 
 
 @pytest.fixture()
